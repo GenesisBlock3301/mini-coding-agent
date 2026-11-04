@@ -1,0 +1,13 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.idea/
+.DS_Store
+
+# Run artifacts
+evals/results/*
+!evals/results/.gitkeep
+traces/
+*.jsonl
