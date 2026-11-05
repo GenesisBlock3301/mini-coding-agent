@@ -16,6 +16,10 @@ import httpx
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_CONNECT_TIMEOUT_S = 5.0
+DEFAULT_READ_TIMEOUT_S = 60.0
+WRITE_TIMEOUT_S = 10.0
+POOL_TIMEOUT_S = 5.0
 
 
 @dataclass
@@ -63,6 +67,58 @@ class ModelError(Exception):
         self.safe_to_retry = safe_to_retry
         self.status_code = status_code
         self.detail = detail
+
+
+@dataclass(frozen=True)
+class ModelConfig:
+    """Where to send a request and how long to wait, resolved once.
+
+    Grouped into one object so call_model keeps a short signature and so a
+    test (or Session 13's concurrent runs) can point at a different endpoint
+    without threading five keyword arguments through every layer.
+    """
+
+    api_key: str
+    base_url: str = DEFAULT_BASE_URL
+    model: str = DEFAULT_MODEL
+    connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_S
+    read_timeout: float = DEFAULT_READ_TIMEOUT_S
+
+    @classmethod
+    def from_env(cls) -> ModelConfig:
+        """Read .env / the environment. Raises ModelError when the key is missing."""
+        api_key = os.getenv("DEEPSEEK_APIKEY")
+        if not api_key:
+            raise ModelError(
+                "auth",
+                "No API key. Set DEEPSEEK_APIKEY in .env.",
+                retryable=False,
+                safe_to_retry=True,
+            )
+        return cls(
+            api_key=api_key,
+            base_url=os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL,
+            model=os.getenv("DEEPSEEK_MODEL") or DEFAULT_MODEL,
+            connect_timeout=float(
+                os.getenv("REQUEST_CONNECT_TIMEOUT_S", str(DEFAULT_CONNECT_TIMEOUT_S))
+            ),
+            read_timeout=float(
+                os.getenv("REQUEST_READ_TIMEOUT_S", str(DEFAULT_READ_TIMEOUT_S))
+            ),
+        )
+
+    @property
+    def completions_url(self) -> str:
+        return f"{self.base_url.rstrip('/')}/chat/completions"
+
+    @property
+    def timeout(self) -> httpx.Timeout:
+        return httpx.Timeout(
+            connect=self.connect_timeout,
+            read=self.read_timeout,
+            write=WRITE_TIMEOUT_S,
+            pool=POOL_TIMEOUT_S,
+        )
 
 
 def _provider_detail(response: httpx.Response) -> str:
@@ -141,55 +197,44 @@ def _classify_status(response: httpx.Response) -> ModelError:
     )
 
 
-def call_model(
+def _build_payload(
     messages: list[dict[str, Any]],
     *,
-    model: str | None = None,
-    base_url: str | None = None,
-    api_key: str | None = None,
-    max_tokens: int | None = None,
-    connect_timeout: float | None = None,
-    read_timeout: float | None = None,
-) -> ModelResponse:
-    """Send one chat-completions request and return a ModelResponse.
-
-    Raises ModelError for every failure. Never raises httpx.
-    """
-    api_key = api_key or os.getenv("DEEPSEEK_APIKEY")
-    if not api_key:
-        raise ModelError(
-            "auth",
-            "No API key. Set DEEPSEEK_APIKEY in .env.",
-            retryable=False,
-            safe_to_retry=True,
-        )
-
-    base_url = (base_url or os.getenv("DEEPSEEK_BASE_URL") or DEFAULT_BASE_URL).rstrip("/")
-    model = model or os.getenv("DEEPSEEK_MODEL") or DEFAULT_MODEL
-    connect_timeout = connect_timeout or float(os.getenv("REQUEST_CONNECT_TIMEOUT_S", "5"))
-    read_timeout = read_timeout or float(os.getenv("REQUEST_READ_TIMEOUT_S", "60"))
-
+    model: str,
+    tools: list[dict[str, Any]] | None,
+    max_tokens: int | None,
+) -> dict[str, Any]:
+    """The request body. Omits optional keys entirely rather than sending null."""
     payload: dict[str, Any] = {"model": model, "messages": messages}
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
+    if tools:
+        # Passed through verbatim. This module knows nothing about list_files
+        # or read_file and must not learn: it serializes whatever it is given,
+        # which is what keeps the adapter swappable in Session 14.
+        payload["tools"] = tools
+    return payload
 
-    timeout = httpx.Timeout(
-        connect=connect_timeout, read=read_timeout, write=10.0, pool=5.0
-    )
 
-    # Measured around the HTTP call only, on a monotonic clock.
-    started = time.monotonic()
+def _post(config: ModelConfig, payload: dict[str, Any]) -> tuple[httpx.Response, float]:
+    """POST once. Returns (response, duration_ms). Translates every httpx error.
+
+    safe_to_retry is the distinction that matters in Session 6: it answers
+    "did this request definitely NOT reach the server", which is what makes a
+    retry free rather than a second billing.
+    """
+    started = time.monotonic()  # monotonic: wall-clock jumps must not show up as latency
     try:
         response = httpx.post(
-            f"{base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {api_key}"},
+            config.completions_url,
+            headers={"Authorization": f"Bearer {config.api_key}"},
             json=payload,
-            timeout=timeout,
+            timeout=config.timeout,
         )
     except httpx.ConnectTimeout as exc:
         raise ModelError(
             "timeout",
-            f"Could not reach DeepSeek within {connect_timeout}s. Check your network.",
+            f"Could not reach DeepSeek within {config.connect_timeout}s. Check your network.",
             retryable=True,
             safe_to_retry=True,  # nothing reached the server
             detail=repr(exc),
@@ -197,16 +242,16 @@ def call_model(
     except (httpx.ReadTimeout, httpx.WriteTimeout) as exc:
         raise ModelError(
             "timeout",
-            f"DeepSeek did not respond within {read_timeout}s. "
+            f"DeepSeek did not respond within {config.read_timeout}s. "
             "The request may still have been processed and billed.",
             retryable=True,
-            safe_to_retry=False,  # <- the distinction that matters in Session 6
+            safe_to_retry=False,
             detail=repr(exc),
         ) from exc
     except httpx.ConnectError as exc:
         raise ModelError(
             "network",
-            f"Cannot connect to {base_url}. Is DEEPSEEK_BASE_URL correct?",
+            f"Cannot connect to {config.base_url}. Is DEEPSEEK_BASE_URL correct?",
             retryable=False,
             safe_to_retry=True,
             detail=repr(exc),
@@ -219,13 +264,13 @@ def call_model(
             safe_to_retry=False,
             detail=repr(exc),
         ) from exc
-    duration_ms = (time.monotonic() - started) * 1000
+    return response, (time.monotonic() - started) * 1000
 
-    if response.status_code != 200:
-        raise _classify_status(response)
 
+def _decode_json(response: httpx.Response) -> dict[str, Any]:
+    """A 200 is not a promise of JSON - a captive portal returns HTML with 200."""
     try:
-        data = response.json()
+        return response.json()
     except ValueError as exc:
         raise ModelError(
             "bad_response",
@@ -235,6 +280,11 @@ def call_model(
             detail=response.text[:500],
         ) from exc
 
+
+def _build_response(
+    data: dict[str, Any], *, duration_ms: float, requested_model: str
+) -> ModelResponse:
+    """Map the provider's shape onto yours. Every field is defaulted."""
     choices = data.get("choices") or []
     if not choices:
         raise ModelError(
@@ -245,13 +295,14 @@ def call_model(
             detail=str(data)[:500],
         )
 
-    message = choices[0].get("message") or {}
+    choice = choices[0]
+    message = choice.get("message") or {}
     usage = data.get("usage") or {}
 
     return ModelResponse(
-        text=message.get("content"),            # may legitimately be None
-        model=data.get("model", model),         # the model that ANSWERED
-        finish_reason=choices[0].get("finish_reason") or "unknown",
+        text=message.get("content"),                 # may legitimately be None
+        model=data.get("model", requested_model),    # the model that ANSWERED
+        finish_reason=choice.get("finish_reason") or "unknown",
         prompt_tokens=usage.get("prompt_tokens", 0),
         completion_tokens=usage.get("completion_tokens", 0),
         total_tokens=usage.get("total_tokens", 0),
@@ -260,4 +311,28 @@ def call_model(
         prompt_cache_hit_tokens=usage.get("prompt_cache_hit_tokens", 0),
         prompt_cache_miss_tokens=usage.get("prompt_cache_miss_tokens", 0),
         raw=data,
+    )
+
+
+def call_model(
+    messages: list[dict[str, Any]],
+    *,
+    config: ModelConfig | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    max_tokens: int | None = None,
+) -> ModelResponse:
+    """Send one chat-completions request and return a ModelResponse.
+
+    config defaults to ModelConfig.from_env(). Raises ModelError for every
+    failure - never httpx, never a raw provider dict.
+    """
+    config = config or ModelConfig.from_env()
+    payload = _build_payload(messages, model=config.model, tools=tools, max_tokens=max_tokens)
+
+    response, duration_ms = _post(config, payload)
+    if response.status_code != 200:
+        raise _classify_status(response)
+
+    return _build_response(
+        _decode_json(response), duration_ms=duration_ms, requested_model=config.model
     )

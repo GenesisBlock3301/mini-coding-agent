@@ -11,3 +11,9 @@ evals/results/*
 !evals/results/.gitkeep
 traces/
 *.jsonl
+
+# Session 2 fixtures - regenerate with scripts/make_fixtures.py.
+# Never commit: contains symlinks pointing outside the repo.
+playground/*
+!playground/.gitkeep
+playground-evil/
