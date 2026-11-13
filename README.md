@@ -17,7 +17,13 @@ cp .env.example .env   # then fill in DEEPSEEK_APIKEY
 
 ## Usage
 
-_TODO (Session 1)_
+```bash
+python -m agent.cli "what's in the awkward folder?" --tools
+python -m agent.cli --resume=<run_id>     # continue a crashed run
+python -m agent.chat                      # interactive session (interlude)
+```
+
+Run `python -m agent.cli` with no task for flags, limits and exit codes.
 
 ## Layout
 
@@ -26,6 +32,9 @@ _TODO (Session 1)_
 | `agent/cli.py` | Accept the task, print result + duration + usage |
 | `agent/model.py` | DeepSeek adapter — the only provider-aware module |
 | `agent/loop.py` | Execution loop, history, tool-call dispatch |
+| `agent/budget.py` | Limits, running totals, estimated spend — every way a run stops |
+| `agent/journal.py` | Append-only run journal; crash recovery via `--resume` |
+| `agent/chat.py` | Interactive session - a REPL over `run_loop`; not a plan milestone, see `docs/interlude-repl.md` |
 | `agent/tools.py` | Tool schemas and implementations |
 | `agent/policy.py` | Workspace boundary and limits, enforced in code |
 | `agent/tracing.py` | JSONL event traces, secrets excluded |
@@ -36,16 +45,16 @@ _TODO (Session 1)_
 
 ## Progress
 
-- [ ] 1. One DeepSeek request: response, duration, usage; legible failures
-- [ ] 2. `list_files` + workspace boundary
-- [ ] 3. `read_file` with size and output limits
-- [ ] 4. Tool call -> execute -> tool result -> model
-- [ ] 5. Multiple tool calls per response; stopping rules
+- [x] 1. One DeepSeek request: response, duration, usage; legible failures
+- [x] 2. `list_files` + workspace boundary
+- [x] 3. `read_file` with size and output limits
+- [x] 4. Tool call -> execute -> tool result -> model
+- [x] 5. Multiple tool calls per response; stopping rules
 - [ ] 6. `replace_text`, exactly one match
 - [ ] 7. Read -> edit against a fixture project
 - [ ] 8. Deliberate failure injection
 - [ ] 9. Repetition and context growth
-- [ ] 10. JSONL traces
+- [~] 10. JSONL traces (`journal.py` covers runs; `tracing.py` still a stub)
 - [ ] 11. 10 eval tasks + runner
 - [ ] 12. 20 tasks, baseline comparison report
 - [ ] 13. FastAPI, isolated workspace per run

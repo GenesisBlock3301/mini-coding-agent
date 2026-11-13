@@ -24,8 +24,9 @@ not an answer (D28).
 from __future__ import annotations
 
 import json
+import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Running this file directly (PyCharm's green arrow) puts agent/ on sys.path
@@ -37,7 +38,24 @@ if __package__ in (None, ""):
 
 from dotenv import load_dotenv
 
-from agent.loop import DEFAULT_MAX_STEPS, STOP_STEP_LIMIT, LoopResult, run_loop
+from agent.budget import (
+    DEFAULT_MAX_STEPS,
+    STOP_SPEND_LIMIT,
+    STOP_STEP_LIMIT,
+    STOP_TIME_LIMIT,
+    STOP_TOKEN_LIMIT,
+    STOP_TOOL_LIMIT,
+    Budget,
+    Pricing,
+)
+from agent.journal import (
+    Journal,
+    JournalCorrupt,
+    ResumeState,
+    new_run_id,
+    rebuild,
+)
+from agent.loop import LoopResult, run_loop
 from agent.model import ModelError, ModelResponse
 from agent.policy import workspace_root
 from agent.tools import TOOL_SCHEMAS, ToolResult
@@ -65,12 +83,26 @@ TOOLS_SYSTEM_PROMPT = (
 
 # Named once so the parser, the usage line and the debug presets below cannot
 # drift apart.
+RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
+
 TOOLS_FLAG = "--tools"
 RAW_FLAG = "--raw"
 MAX_STEPS_FLAG = "--max-steps="
+MAX_TOOL_CALLS_FLAG = "--max-tool-calls="
+MAX_SECONDS_FLAG = "--max-seconds="
+MAX_TOKENS_FLAG = "--max-tokens="
+MAX_SPEND_FLAG = "--max-spend="
+RESUME_FLAG = "--resume="
 USAGE = (
     f'usage: python -m agent.cli "your task" '
-    f"[{TOOLS_FLAG}] [{RAW_FLAG}] [{MAX_STEPS_FLAG}N]"
+    f"[{TOOLS_FLAG}] [{RAW_FLAG}] [{MAX_STEPS_FLAG}N]\n"
+    f"       [{MAX_TOOL_CALLS_FLAG}N] [{MAX_SECONDS_FLAG}S] "
+    f"[{MAX_TOKENS_FLAG}N] [{MAX_SPEND_FLAG}USD]\n"
+    f"       python -m agent.cli {RESUME_FLAG}<run_id>      # continue a dead run\n"
+    f"\nLimits default from .env (MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS,\n"
+    f"MAX_TOTAL_TOKENS, MAX_SPEND, TOKEN_RESERVE); flags override them.\n"
+    f"{MAX_SPEND_FLAG}USD needs PRICE_* configured in .env - an unpriced spend\n"
+    f"limit cannot be enforced, so it is refused rather than ignored."
 )
 
 # Exit codes let a caller classify a failure without parsing text.
@@ -88,6 +120,17 @@ EXIT_USAGE = 2
 EXIT_UNKNOWN = 1
 EXIT_STEP_LIMIT = 11
 
+# D40: one code per stop reason, not one code for "stopped". Session 11's
+# runner has to tell "the model answered" from "the agent ran out of money"
+# without parsing English, and so does any shell wrapper you write.
+LIMIT_EXIT_CODES = {
+    STOP_STEP_LIMIT: EXIT_STEP_LIMIT,
+    STOP_TOOL_LIMIT: 12,
+    STOP_TIME_LIMIT: 13,
+    STOP_TOKEN_LIMIT: 14,
+    STOP_SPEND_LIMIT: 15,
+}
+
 
 @dataclass(frozen=True)
 class Options:
@@ -96,7 +139,39 @@ class Options:
     task: str
     use_tools: bool
     show_raw: bool
-    max_steps: int = DEFAULT_MAX_STEPS
+    # None means "not given on the command line" - .env or the Budget default
+    # then decides. 0 is a real value and must not collapse into "unset".
+    max_steps: int | None = None
+    max_tool_calls: int | None = None
+    max_seconds: float | None = None
+    max_tokens: int | None = None
+    max_spend: float | None = None
+    resume_run_id: str | None = None
+
+    def budget(self, pricing: Pricing | None) -> Budget:
+        """Flags over .env over defaults. Built here so nothing downstream
+        reads argv, and so the whole rule set is one printable value."""
+        base = Budget.from_env(pricing=pricing)
+        return replace(
+            base,
+            max_steps=self.max_steps if self.max_steps is not None else base.max_steps,
+            max_tool_calls=(
+                self.max_tool_calls
+                if self.max_tool_calls is not None
+                else base.max_tool_calls
+            ),
+            max_seconds=(
+                self.max_seconds if self.max_seconds is not None else base.max_seconds
+            ),
+            max_total_tokens=(
+                self.max_tokens
+                if self.max_tokens is not None
+                else base.max_total_tokens
+            ),
+            max_spend=(
+                self.max_spend if self.max_spend is not None else base.max_spend
+            ),
+        )
 
     @property
     def system_prompt(self) -> str:
@@ -105,6 +180,24 @@ class Options:
     @property
     def tool_schemas(self) -> list[dict] | None:
         return TOOL_SCHEMAS if self.use_tools else None
+
+
+def _positive_number(value: str, kind: str) -> float | None:
+    """A limit of zero or a limit of 'abc' is a typo, not a configuration.
+
+    Returning None (rejecting the whole command line) rather than clamping:
+    a silently corrected limit is a limit the user believes in and does not
+    have.
+    """
+    try:
+        number = int(value) if kind == "int" else float(value)
+    except ValueError:
+        return None
+    return None if number <= 0 else float(number)
+
+
+def _as_int(value: float | None) -> int | None:
+    return None if value is None else int(value)
 
 
 def parse_argv(argv: list[str]) -> Options | None:
@@ -116,23 +209,42 @@ def parse_argv(argv: list[str]) -> Options | None:
     flags = {a for a in argv[1:] if a.startswith("--")}
     positional = [a for a in argv[1:] if not a.startswith("--")]
 
-    if not positional or not positional[0].strip():
+    resume_run_id = next(
+        (f[len(RESUME_FLAG):] for f in flags if f.startswith(RESUME_FLAG)), None
+    )
+    # A resumed run takes its task from the journal, so no task is required.
+    if resume_run_id:
+        if not resume_run_id.strip():
+            return None
+    elif not positional or not positional[0].strip():
         return None
 
-    max_steps = DEFAULT_MAX_STEPS
-    for flag in flags:
-        if not flag.startswith(MAX_STEPS_FLAG):
-            continue
-        value = flag[len(MAX_STEPS_FLAG):]
-        if not value.isdigit() or int(value) < 1:
-            return None
-        max_steps = int(value)
+    numbers: dict[str, float] = {}
+    for prefix, kind in (
+        (MAX_STEPS_FLAG, "int"),
+        (MAX_TOOL_CALLS_FLAG, "int"),
+        (MAX_TOKENS_FLAG, "int"),
+        (MAX_SECONDS_FLAG, "float"),
+        (MAX_SPEND_FLAG, "float"),
+    ):
+        for flag in flags:
+            if not flag.startswith(prefix):
+                continue
+            value = _positive_number(flag[len(prefix):], kind)
+            if value is None:
+                return None
+            numbers[prefix] = value
 
     return Options(
-        task=positional[0],
+        task=positional[0] if positional else "",
         use_tools=TOOLS_FLAG in flags,
         show_raw=RAW_FLAG in flags,
-        max_steps=max_steps,
+        max_steps=_as_int(numbers.get(MAX_STEPS_FLAG)),
+        max_tool_calls=_as_int(numbers.get(MAX_TOOL_CALLS_FLAG)),
+        max_seconds=numbers.get(MAX_SECONDS_FLAG),
+        max_tokens=_as_int(numbers.get(MAX_TOKENS_FLAG)),
+        max_spend=numbers.get(MAX_SPEND_FLAG),
+        resume_run_id=resume_run_id,
     )
 
 
@@ -148,6 +260,31 @@ def report_model_error(err: ModelError) -> int:
     return EXIT_CODES.get(err.kind, EXIT_UNKNOWN)
 
 
+def _failpoint(name: str, step: int) -> None:
+    """Pull the plug if this run asked for it. Off unless the env var is set.
+
+        CRASH_AFTER_STEP=1 python -m agent.cli --tools "..."
+        CRASH_AFTER_TOOL=1 python -m agent.cli --tools "..."
+
+    os._exit, not sys.exit: sys.exit raises, which unwinds the stack and runs
+    `finally` blocks and atexit handlers. A SIGKILL, an OOM kill and a power
+    cut do none of that, so neither does this.
+
+    A named failpoint in the real code path is how production systems rehearse
+    this (etcd failpoints, the `fail` crate). A copy of the loop in a demo
+    script rehearses the demo script.
+    """
+    wanted = os.getenv(name)
+    if wanted and wanted.isdigit() and int(wanted) == step:
+        print(
+            f"\n>>> failpoint {name}={step}: power cut. Nothing was persisted,"
+            " because there is nowhere to persist it. <<<",
+            file=sys.stderr,
+        )
+        sys.stderr.flush()
+        os._exit(137)
+
+
 def print_response(step: int, response: ModelResponse) -> None:
     """One line per model call: what it cost and what it decided."""
     print(
@@ -161,6 +298,7 @@ def print_response(step: int, response: ModelResponse) -> None:
     )
     if response.text:
         print(f"  said: {response.text}", file=sys.stderr)
+    _failpoint("CRASH_AFTER_STEP", step)
 
 
 def print_tool(step: int, call: dict, result: ToolResult) -> None:
@@ -178,17 +316,96 @@ def print_tool(step: int, call: dict, result: ToolResult) -> None:
     print(f"    {status}", file=sys.stderr)
     for line in result.content.splitlines():
         print(f"    | {line}", file=sys.stderr)
+    # Crashing HERE is the interesting one: the tool already ran. Harmless
+    # while tools are read-only; in Session 6 the file is already edited.
+    _failpoint("CRASH_AFTER_TOOL", step)
+
+
+def report_resume(state: ResumeState) -> None:
+    """What the journal says the dead process got through."""
+    print(f"  replayed {state.steps_done} model call(s) and "
+          f"{state.replayed_tools} tool result(s) from disk - cost: nothing",
+          file=sys.stderr)
+    if state.answer_ready:
+        print("  the final answer was already generated and paid for. "
+              "No API call needed.", file=sys.stderr)
+    if state.unanswered_calls:
+        names = ", ".join(
+            (c.get("function") or {}).get("name", "?") for c in state.unanswered_calls
+        )
+        print(f"  unanswered tool call(s) to redo: {names}", file=sys.stderr)
+    if state.in_flight_call_ids:
+        print(f"  WARNING: {len(state.in_flight_call_ids)} tool(s) were entered but "
+              "never recorded an outcome. Safe to redo only because list_files and "
+              "read_file do not mutate anything.", file=sys.stderr)
+    if state.model_call_was_in_flight:
+        print("  WARNING: a model call was in flight when the process died. It may "
+              "have been billed; the response is unrecoverable. Re-calling.",
+              file=sys.stderr)
 
 
 def report_totals(result: LoopResult) -> None:
-    """The whole run, which is what you actually pay for."""
+    """The whole run, which is what you actually pay for.
+
+    Token totals come from the ledger, so a resumed run reports what the RUN
+    spent, not what this process spent. `model=` is latency; `wall=` includes
+    every tool call and is what the time limit actually measures.
+    """
+    cost = result.cost_usd
+    cost_text = "unpriced" if cost is None else f"${cost:.6f}"
     print(
-        f"\n[total] stop={result.stop_reason} steps={result.steps} "
-        f"{result.duration_ms:.0f}ms "
+        f"\n[total] stop={result.stop_reason} steps={result.steps}/"
+        f"{result.budget.max_steps} tools={result.tool_calls}"
+        + (f"/{result.budget.max_tool_calls}"
+           if result.budget.max_tool_calls is not None else "")
+        + f" model={result.duration_ms:.0f}ms wall={result.elapsed_s:.1f}s "
         f"tokens in={result.prompt_tokens} (cache hit={result.cache_hit_tokens}) "
-        f"out={result.completion_tokens} total={result.total_tokens}",
+        f"out={result.completion_tokens} total={result.total_tokens} "
+        f"est={cost_text}"
+        + (f" (resumed, {result.replayed_tools} tool result(s) replayed)"
+           if result.resumed else ""),
         file=sys.stderr,
     )
+    if result.malformed_call_ids:
+        # Not fatal, and not fixable here: the id is the provider's. Printed
+        # because two tool messages sharing an id is a 400 you want to have
+        # predicted rather than debugged.
+        print(
+            f"  WARNING: {len(result.malformed_call_ids)} tool call(s) arrived with "
+            "a missing or duplicated id. They were answered in order anyway.",
+            file=sys.stderr,
+        )
+
+
+def explain_limit(result: LoopResult) -> str:
+    """Why this run stopped, in the units the user set the limit in."""
+    budget = result.budget
+    reason = result.stop_reason
+    if reason == STOP_STEP_LIMIT:
+        return f"{budget.max_steps} steps used without a final answer"
+    if reason == STOP_TOOL_LIMIT:
+        return (
+            f"the run's tool-call budget ({budget.max_tool_calls}) is spent; "
+            f"{result.tool_calls} call(s) ran"
+        )
+    if reason == STOP_TIME_LIMIT:
+        return (
+            f"the run passed its time limit ({budget.max_seconds:g}s) "
+            f"after {result.elapsed_s:.1f}s"
+        )
+    if reason == STOP_TOKEN_LIMIT:
+        return (
+            f"{result.total_tokens} tokens used of {budget.max_total_tokens}; "
+            f"another call needs {budget.token_reserve} in reserve, so it was "
+            "never made"
+        )
+    if reason == STOP_SPEND_LIMIT:
+        spent = result.cost_usd or 0.0
+        return (
+            f"estimated spend ${spent:.6f} plus the reserve exceeds "
+            f"${budget.max_spend:.6f}; the next call was never made"
+        )
+    return reason
 
 
 def report_raw(response: ModelResponse) -> None:
@@ -204,19 +421,67 @@ def main(argv: list[str]) -> int:
         print(USAGE, file=sys.stderr)
         return EXIT_USAGE
 
-    messages = [
-        {"role": "system", "content": options.system_prompt},
-        {"role": "user", "content": options.task},
-    ]
+    budget = options.budget(Pricing.from_env())
+    # D38. A spend limit with no price list is not "unlimited" - it is a
+    # number on screen that nothing enforces, which is worse than no number.
+    if budget.needs_pricing:
+        print(
+            f"error [usage]: {MAX_SPEND_FLAG} needs prices. Set "
+            "PRICE_INPUT_CACHE_HIT_PER_M, PRICE_INPUT_CACHE_MISS_PER_M and "
+            "PRICE_OUTPUT_PER_M in .env from the current price list.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+
+    messages: list[dict] = []
+    resume: ResumeState | None = None
+
+    if options.resume_run_id:
+        try:
+            journal = Journal.open(RUNS_DIR, options.resume_run_id)
+        except FileNotFoundError as err:
+            print(f"error [no_journal]: {err}", file=sys.stderr)
+            return EXIT_USAGE
+        print(f"resuming run {options.resume_run_id}", file=sys.stderr)
+
+        # Explicit, not left to the first append: a repair that discards bytes
+        # is a fact about the crash and belongs on screen, not in silence.
+        discarded = journal.heal()
+        if discarded:
+            print(
+                f"  repaired: dropped {discarded} bytes of a torn final record "
+                "(the event it described never completed)",
+                file=sys.stderr,
+            )
+
+        try:
+            resume = rebuild(journal.events())
+        except JournalCorrupt as err:
+            print(f"error [journal_corrupt]: {err}", file=sys.stderr)
+            return EXIT_USAGE
+
+        report_resume(resume)
+    else:
+        run_id = new_run_id()
+        journal = Journal.create(RUNS_DIR, run_id)
+        # Printed FIRST: after a crash this line is the only way back in.
+        print(f"run {run_id}  (resume with --resume={run_id})", file=sys.stderr)
+        print(f"budget: {budget.describe()}", file=sys.stderr)
+        messages = [
+            {"role": "system", "content": options.system_prompt},
+            {"role": "user", "content": options.task},
+        ]
 
     try:
         result = run_loop(
             messages,
             root=workspace_root(),
             tools=options.tool_schemas,
-            max_steps=options.max_steps,
+            budget=budget,
             on_response=print_response,
             on_tool=print_tool,
+            journal=journal,
+            resume=resume,
         )
     except ModelError as err:
         return report_model_error(err)
@@ -225,13 +490,15 @@ def main(argv: list[str]) -> int:
     if options.show_raw and result.responses:
         report_raw(result.responses[-1])
 
-    if result.stop_reason == STOP_STEP_LIMIT:
+    if result.stopped_by_limit:
+        # D28, extended to every limit: no partial answer reaches stdout, no
+        # matter which budget ended the run.
         print(
-            f"incomplete: {options.max_steps} steps used without a final answer. "
+            f"incomplete [{result.stop_reason}]: {explain_limit(result)}. "
             "Nothing written to stdout - a partial answer is not an answer.",
             file=sys.stderr,
         )
-        return EXIT_STEP_LIMIT
+        return LIMIT_EXIT_CODES.get(result.stop_reason, EXIT_UNKNOWN)
 
     if result.text is not None:
         print(result.text)
