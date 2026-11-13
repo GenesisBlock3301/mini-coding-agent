@@ -89,11 +89,28 @@ def lines(*inputs: str):
 
 @pytest.fixture(autouse=True)
 def runs_in_tmp(tmp_path, monkeypatch):
-    """Journals land in tmp, never in the project's runs/."""
+    """Journals land in tmp, and the developer's .env cannot reach these tests.
+
+    `main` calls load_dotenv(), so without this every test here inherits
+    whatever is in the real .env. That is not hypothetical: adding
+    PROVIDER=ollama to .env broke two spend-limit tests, because a local
+    provider is priced with Pricing.free() and a spend limit that can never
+    be reached never fires. The code was right and the tests were coupled to
+    one machine.
+
+    Note load_dotenv() does NOT override variables already set, so pinning a
+    value here beats deleting it - a delete just lets the file win.
+    """
     monkeypatch.setattr("agent.chat.RUNS_DIR", tmp_path / "runs")
-    monkeypatch.delenv("MAX_SESSION_TOKENS", raising=False)
-    monkeypatch.delenv("MAX_SESSION_SPEND", raising=False)
-    monkeypatch.delenv("MAX_CONTEXT_TOKENS", raising=False)
+    monkeypatch.setenv("PROVIDER", "deepseek")
+    monkeypatch.setenv("DEEPSEEK_APIKEY", "sk-test-not-used")
+    for name in (
+        "MAX_SESSION_TOKENS", "MAX_SESSION_SPEND", "MAX_CONTEXT_TOKENS",
+        "MAX_STEPS", "MAX_TOOL_CALLS", "MAX_RUN_SECONDS", "TOKEN_RESERVE",
+        "PRICE_INPUT_CACHE_HIT_PER_M", "PRICE_INPUT_CACHE_MISS_PER_M",
+        "PRICE_OUTPUT_PER_M",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 # ---- the feature itself -------------------------------------------------

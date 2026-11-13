@@ -56,7 +56,7 @@ from agent.journal import (
     rebuild,
 )
 from agent.loop import LoopResult, run_loop
-from agent.model import ModelError, ModelResponse
+from agent.model import ModelConfig, ModelError, ModelResponse, active_provider, context_warning
 from agent.policy import workspace_root
 from agent.tools import TOOL_SCHEMAS, ToolResult
 
@@ -248,6 +248,16 @@ def parse_argv(argv: list[str]) -> Options | None:
     )
 
 
+def _warn_about_context(provider) -> None:
+    """A silently truncating server is worse than one that refuses."""
+    try:
+        warning = context_warning(ModelConfig.from_env())
+    except ModelError:
+        return
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
+
+
 def report_model_error(err: ModelError) -> int:
     """Print one actionable line about a failed call; return its exit code."""
     print(f"error [{err.kind}]: {err.user_message}", file=sys.stderr)
@@ -421,7 +431,15 @@ def main(argv: list[str]) -> int:
         print(USAGE, file=sys.stderr)
         return EXIT_USAGE
 
-    budget = options.budget(Pricing.from_env())
+    # A local model is free, and "free" is a fact about the provider, not a
+    # price list the environment forgot to set. See Pricing.free().
+    try:
+        provider = active_provider()
+    except ModelError as err:
+        return report_model_error(err)
+    pricing = Pricing.free() if provider.free else Pricing.from_env()
+
+    budget = options.budget(pricing)
     # D38. A spend limit with no price list is not "unlimited" - it is a
     # number on screen that nothing enforces, which is worse than no number.
     if budget.needs_pricing:
@@ -467,6 +485,7 @@ def main(argv: list[str]) -> int:
         # Printed FIRST: after a crash this line is the only way back in.
         print(f"run {run_id}  (resume with --resume={run_id})", file=sys.stderr)
         print(f"budget: {budget.describe()}", file=sys.stderr)
+        _warn_about_context(provider)
         messages = [
             {"role": "system", "content": options.system_prompt},
             {"role": "user", "content": options.task},

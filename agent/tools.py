@@ -52,6 +52,7 @@ class ToolResult:
     truncated: bool = False
 
 EMPTY_DIRECTORY = "(empty directory)"
+NO_SUBDIRECTORIES = "(no subdirectories here)"
 
 # Step 13. Two caps, because either one alone leaks.
 #
@@ -116,6 +117,141 @@ def _rejected(violation: PolicyViolation) -> ToolResult:
     return ToolResult(ok=False, content=violation.message, error_code=violation.code)
 
 
+def _scan(
+    target: Path, path: str | os.PathLike[str]
+) -> tuple[list[str], list[str]] | ToolResult:
+    """One directory, split into (directories, files). Errors are RETURNED.
+
+    Shared by list_files and list_folders so the three ways scandir fails are
+    classified in exactly one place. Two tools with two copies of this would
+    drift the first time one of them learned a new error.
+
+    is_dir(follow_symlinks=False) is the load-bearing argument: a symlink
+    pointing at a directory counts as a FILE here. Classifying it as a
+    directory would invite a model to list it, and policy would then refuse
+    it as `symlink` - a listing that advertises a path the boundary rejects.
+    """
+    dirs: list[str] = []
+    files: list[str] = []
+    try:
+        # No exists() check before this. scandir failing IS the existence
+        # test, and it runs after the boundary - see list_files' docstring.
+        with os.scandir(target) as entries:
+            for entry in entries:
+                if entry.is_dir(follow_symlinks=False):
+                    dirs.append(entry.name)
+                else:
+                    files.append(entry.name)
+    except FileNotFoundError:
+        return _tool_error(
+            "not_found",
+            f"{echo_path(path)}: no such directory in the workspace. List its "
+            "parent to see what is actually there, e.g. list_files('.').",
+        )
+    except NotADirectoryError:
+        return _tool_error(
+            "not_a_directory",
+            f"{echo_path(path)} is a file, not a directory. List the directory "
+            "that contains it, or read it with read_file.",
+        )
+    except PermissionError:
+        # Not in the session's table, but the third thing scandir raises in
+        # practice. Returning it keeps the "no raw exception escapes" promise
+        # from step 7 true on this side of the boundary too.
+        return _tool_error(
+            "permission_denied",
+            f"{echo_path(path)}: permission denied. Try a different directory "
+            "inside the workspace.",
+        )
+    return dirs, files
+
+
+def _render(
+    lines: list[str], *, empty: str, noun: str = "entries", one: str = "1 entry"
+) -> ToolResult:
+    """Cap a listing and footer it honestly. Shared so the caps cannot drift."""
+    if not lines:
+        # No footer here. "(0 entries)" says nothing the sentence does not,
+        # and the blank line it sat above read like output that got cut off.
+        return ToolResult(ok=True, content=empty)
+
+    total = len(lines)
+    kept = lines[:MAX_ENTRIES]
+
+    # The byte cap is applied to the NAMES, before the footer is composed, so
+    # the notice itself can never be the thing that gets cut off. A truncation
+    # notice that is itself truncated is worse than none: the model sees a
+    # short listing and no reason to doubt it.
+    budget = MAX_BYTES
+    within_budget: list[str] = []
+    for line in kept:
+        budget -= len(line.encode()) + 1  # +1 for the newline
+        if budget < 0:
+            break
+        within_budget.append(line)
+    kept = within_budget
+
+    shown = len(kept)
+    if shown < total:
+        # The count is honest about what was HIDDEN. A model told only
+        # "truncated" cannot tell 5 missing entries from 4,800, and will
+        # happily conclude the directory holds exactly `shown` files.
+        # `total` is safe to reveal: this directory is already proven inside
+        # the workspace, so the number leaks nothing the listing did not.
+        footer = (
+            f"({shown} of {total} {noun} shown; output truncated. "
+            "List a subdirectory to narrow it down.)"
+        )
+    else:
+        footer = f"({total} {noun})" if total != 1 else f"({one})"
+
+    content = "\n".join([*kept, "", footer])
+
+    # truncated is for the CODE. The model only ever learns from the footer
+    # above - which is why both are set in the same branch, from the same
+    # comparison. Setting one without the other is the step 13 bug.
+    return ToolResult(ok=True, content=content, truncated=shown < total)
+
+
+def list_folders(path: str | os.PathLike[str], *, root: Path) -> ToolResult:
+    """The subdirectories of one directory, and nothing else.
+
+    list_files already answers this - directories are the lines ending in "/"
+    - so this tool buys no new capability. What it buys is TOKENS and
+    attention: `playground/many` holds 5000 files and 0 subdirectories, and
+    asking list_files about it returns 200 truncated filenames the model then
+    has to read, reason about and ignore.
+
+    The cost is a third schema on every request forever, and one more way for
+    the model to pick wrong. That trade is only worth it where listings are
+    large; on a small directory, prefer list_files and read the slashes.
+
+    Symlinked directories are NOT included, for the same reason list_files
+    does not mark them: policy refuses to follow them, so listing one here
+    would advertise a path that cannot be used.
+    """
+    try:
+        target = resolve_in_workspace(path, root=root)
+    except PolicyViolation as violation:
+        return _rejected(violation)
+
+    scanned = _scan(target, path)
+    if isinstance(scanned, ToolResult):
+        return scanned
+    dirs, _files = scanned
+
+    # The trailing "/" is kept even though every line is a directory. One
+    # convention across both tools beats a shorter string here: a model that
+    # has learned "/ means directory" from list_files reads this correctly
+    # without being told anything new.
+    return _render(
+        [f"{name}/" for name in sorted(dirs)],
+        empty=NO_SUBDIRECTORIES,
+        noun="directories",
+        one="1 directory",
+    )
+
+
 def list_files(path: str | os.PathLike[str], *, root: Path) -> ToolResult:
     """List one directory inside the workspace. (Step 9)
 
@@ -168,84 +304,15 @@ def list_files(path: str | os.PathLike[str], *, root: Path) -> ToolResult:
     except PolicyViolation as violation:
         return _rejected(violation)
 
-    dirs: list[str] = []
-    files: list[str] = []
-    try:
-        # No exists() check before this. scandir failing IS the existence
-        # test, and it runs after the boundary - see the docstring.
-        with os.scandir(target) as entries:
-            for entry in entries:
-                if entry.is_dir(follow_symlinks=False):
-                    dirs.append(entry.name)
-                else:
-                    files.append(entry.name)
-    except FileNotFoundError:
-        return _tool_error(
-            "not_found",
-            f"{echo_path(path)}: no such directory in the workspace. List its "
-            "parent to see what is actually there, e.g. list_files('.').",
-        )
-    except NotADirectoryError:
-        return _tool_error(
-            "not_a_directory",
-            f"{echo_path(path)} is a file, not a directory. List the directory "
-            "that contains it, or read it with read_file.",
-        )
-    except PermissionError:
-        # Not in the session's table, but the third thing scandir raises in
-        # practice. Returning it keeps the "no raw exception escapes" promise
-        # from step 7 true on this side of the boundary too.
-        return _tool_error(
-            "permission_denied",
-            f"{echo_path(path)}: permission denied. Try a different directory "
-            "inside the workspace.",
-        )
+    scanned = _scan(target, path)
+    if isinstance(scanned, ToolResult):
+        return scanned
+    dirs, files = scanned
 
     # Sort the NAMES, then decorate. Appending "/" before sorting would let the
     # separator itself take part in the comparison.
     lines = [f"{name}/" for name in sorted(dirs)] + sorted(files)
-
-    if not lines:
-        # No footer here. "(0 entries)" says nothing the sentence does not,
-        # and the blank line it sat above read like output that got cut off.
-        return ToolResult(ok=True, content=EMPTY_DIRECTORY)
-
-    total = len(lines)
-    kept = lines[:MAX_ENTRIES]
-
-    # The byte cap is applied to the NAMES, before the footer is composed, so
-    # the notice itself can never be the thing that gets cut off. A truncation
-    # notice that is itself truncated is worse than none: the model sees a
-    # short listing and no reason to doubt it.
-    budget = MAX_BYTES
-    within_budget: list[str] = []
-    for line in kept:
-        budget -= len(line.encode()) + 1  # +1 for the newline
-        if budget < 0:
-            break
-        within_budget.append(line)
-    kept = within_budget
-
-    shown = len(kept)
-    if shown < total:
-        # The count is honest about what was HIDDEN. A model told only
-        # "truncated" cannot tell 5 missing entries from 4,800, and will
-        # happily conclude the directory holds exactly `shown` files.
-        # `total` is safe to reveal: this directory is already proven inside
-        # the workspace, so the number leaks nothing the listing did not.
-        footer = (
-            f"({shown} of {total} entries shown; output truncated. "
-            "List a subdirectory to narrow it down.)"
-        )
-    else:
-        footer = f"({total} entries)" if total != 1 else "(1 entry)"
-
-    content = "\n".join([*kept, "", footer])
-
-    # truncated is for the CODE. The model only ever learns from the footer
-    # above - which is why both are set in the same branch, from the same
-    # comparison. Setting one without the other is the step 13 bug.
-    return ToolResult(ok=True, content=content, truncated=shown < total)
+    return _render(lines, empty=EMPTY_DIRECTORY)
 
 
 def read_file(path: str | os.PathLike[str], *, root: Path) -> ToolResult:
@@ -412,6 +479,31 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "list_folders",
+            "description": (
+                "List only the subdirectories of one directory inside the "
+                "workspace, skipping files. Use this instead of list_files "
+                "when you only need to know where to go next, especially in "
+                "a directory with many files. Does not recurse. Paths are "
+                "relative to the workspace root; absolute paths and paths "
+                "outside the workspace are refused."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Workspace-relative directory, e.g. 'src' or '.'",
+                    }
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "read_file",
             "description": (
                 "Read one UTF-8 text file inside the workspace. Long files are "
@@ -435,6 +527,7 @@ TOOL_SCHEMAS = [
 
 TOOLS = {
     "list_files": list_files,
+    "list_folders": list_folders,
     "read_file": read_file,
 }
 

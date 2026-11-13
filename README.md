@@ -25,12 +25,31 @@ python -m agent.chat                      # interactive session (interlude)
 
 Run `python -m agent.cli` with no task for flags, limits and exit codes.
 
+### Providers
+
+One adapter, two providers — both speak the OpenAI chat-completions shape, so
+`PROVIDER` only selects defaults (base URL, model, whether a key is needed,
+timeout, pricing).
+
+```bash
+PROVIDER=deepseek python -m agent.cli "..." --tools   # hosted, needs a key
+PROVIDER=ollama   python -m agent.chat               # local, free, no key
+```
+
+`PROVIDER` unset means deepseek, and every `DEEPSEEK_*` variable is unchanged.
+
+**Ollama serves 4096 tokens of context by default**, whatever the model
+supports, and silently drops the oldest messages on overflow — which corrupts
+an agent's tool-call history rather than failing loudly. Start the server with
+`OLLAMA_CONTEXT_LENGTH=32768 ollama serve`; both entry points check for this
+and warn.
+
 ## Layout
 
 | Path | Responsibility |
 | --- | --- |
 | `agent/cli.py` | Accept the task, print result + duration + usage |
-| `agent/model.py` | DeepSeek adapter — the only provider-aware module |
+| `agent/model.py` | Model adapter — the only provider-aware module (DeepSeek or local Ollama) |
 | `agent/loop.py` | Execution loop, history, tool-call dispatch |
 | `agent/budget.py` | Limits, running totals, estimated spend — every way a run stops |
 | `agent/journal.py` | Append-only run journal; crash recovery via `--resume` |
@@ -58,7 +77,8 @@ Run `python -m agent.cli` with no task for flags, limits and exit codes.
 - [ ] 11. 10 eval tasks + runner
 - [ ] 12. 20 tasks, baseline comparison report
 - [ ] 13. FastAPI, isolated workspace per run
-- [ ] 14. Docker, docs, demo
+- [ ] 14. Persistent memory: resume by default + a memory file outside the workspace
+- [ ] 15. Docker, docs, demo
 
 ## Session notes
 

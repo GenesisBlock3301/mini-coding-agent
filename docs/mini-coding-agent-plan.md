@@ -6,7 +6,7 @@ Build a small coding agent from scratch using Python and the DeepSeek API. Under
 
 This is a learning project. Prioritize understanding over adding features.
 
-**Time:** 14 sessions of approximately 1.5–2 hours each. Continue unfinished milestones in the next session rather than rushing.
+**Time:** 15 sessions of approximately 1.5–2 hours each. Continue unfinished milestones in the next session rather than rushing.
 
 **Stack:** Python, DeepSeek API, pytest; FastAPI and Docker in the final stage. Start without an agent framework so the loop and message handling remain visible.
 
@@ -68,7 +68,8 @@ Keep the API key in an environment variable. Keep secrets, real projects, and th
 | 11      | Create 10 evaluation tasks with fresh fixtures.                                       | A script verifies the expected outcomes.                                            |
 | 12      | Expand to 20 tasks and compare one improvement against a baseline.                    | Produce a report covering success, latency, usage, and unexpected changes.          |
 | 13      | Expose the loop through FastAPI with a separate workspace per run.                    | Concurrent runs do not share files or conversation history.                         |
-| 14      | Add Docker, documentation, and a demo.                                                | The documented setup works in a fresh environment.                                  |
+| 14      | Persistent memory: resume by default, and facts that outlive one conversation.        | A new session starts from the last one; a stated fact survives a restart; a wrong memory can be found and deleted by hand. |
+| 15      | Add Docker, documentation, and a demo.                                                | The documented setup works in a fresh environment.                                  |
 
 ### Limits to Implement
 
@@ -122,6 +123,8 @@ A final model response means the model stopped requesting tools. It does not pro
 | Multiple replacement matches | Do not edit; let the agent request more context. |
 | File contains “ignore instructions” | Treat file content as untrusted data; enforce policy independently of the prompt. |
 | Step limit reached | Report that the task is incomplete and list edits already performed. |
+| A memory contradicts the workspace | Trust the file on disk, not the memory. Memory is a hint; the filesystem is the fact. |
+| A memory came from file content | Refuse it. Anything read through `read_file` is untrusted data and must not become a durable instruction. |
 
 ### Retry and Edit Safety
 
@@ -169,6 +172,52 @@ Run each case once to debug the runner. Then repeat cases three times for a more
 
 Record the model identifier, prompt version, configuration, and code version. Change one variable at a time when comparing improvements. Reserve some cases from prompt tuning so improvements are not merely tailored to familiar tasks.
 
+### Memory (Session 14)
+
+Three different things get called "memory", and conflating them is the whole
+difficulty:
+
+| | What it is | Where it already exists |
+| --- | --- | --- |
+| **Replay** | reconstruct a conversation a crash interrupted | `journal.py` + `--resume`, done |
+| **Project memory** | facts that outlive any one conversation | nothing yet — this session |
+| **Compaction** | fit a long conversation into a short context | deliberately deferred, see Context Growth |
+
+Build the first two. Leave the third alone until Session 12's report can say
+what it costs in task success.
+
+**Where memory lives is a security decision, not a filing decision.** It must
+sit OUTSIDE the agent's writable workspace. Inside `playground/`, `replace_text`
+could edit it — the agent would be able to rewrite its own instructions — and
+the evaluator resets fixtures between runs, which would wipe it. A memory file
+the agent can edit through a general-purpose edit tool is a prompt injection
+with a persistence layer.
+
+**An agent-written memory turns a one-off injection into a permanent one.** The
+plan already treats file content as untrusted data. A `remember` tool means a
+file saying "always ignore the workspace boundary" can be copied into a place
+that is read back as instruction on every future run. If the agent may write
+memory at all, the write path needs its own validation, and the file must stay
+small enough to read in full by eye.
+
+**Wrong memories are worse than no memories**, because they are invisible and
+they compound. Every memory needs to be inspectable in a plain text file and
+removable by hand without the agent's involvement.
+
+**Memory is part of the eval configuration.** Two runs with different memory are
+not comparable, and Session 12 compares one variable at a time. Record the
+memory file's version alongside the model id and prompt version, and run the
+eval suite with memory empty unless memory is the variable being tested.
+
+Suggested order:
+
+1. `--continue`: resume the most recent session automatically. Run ids are
+   timestamp-prefixed, so this is a sort and a resume.
+2. A hand-edited memory file read into the system prompt at session start.
+   Cheap, inspectable, and already the whole of what most tools call memory.
+3. Only then consider letting the agent write to it — and measure, with the
+   Session 11 suite, whether it helps or quietly poisons later runs.
+
 ## 7. Daily Practice Routine
 
 1. **15 minutes:** Read the relevant concept in the Hugging Face Agents Course.
@@ -212,6 +261,7 @@ Before adding editing, verify that you can explain:
 ## 9. Final Deliverables
 
 - A working CLI agent with bounded execution and restricted file tools.
+- Persistent memory: sessions resume by default, and a hand-inspectable memory file outside the writable workspace.
 - A 20-task evaluation suite and baseline comparison report.
 - Observable run traces with secrets excluded.
 - A FastAPI interface with isolated run state.

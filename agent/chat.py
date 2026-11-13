@@ -65,7 +65,7 @@ from agent.cli import (
 )
 from agent.journal import Journal, JournalCorrupt, new_run_id, rebuild
 from agent.loop import LoopResult, run_loop, tool_message
-from agent.model import ModelError, call_model
+from agent.model import ModelConfig, ModelError, active_provider, call_model, context_warning
 from agent.policy import workspace_root
 from agent.tools import TOOL_SCHEMAS, ToolResult
 
@@ -456,7 +456,13 @@ def main(
             print(USAGE, file=sys.stderr)
             return 2
 
-    turn_limits = Budget.from_env(pricing=Pricing.from_env())
+    try:
+        provider = active_provider()
+    except ModelError as err:
+        return report_model_error(err)
+    pricing = Pricing.free() if provider.free else Pricing.from_env()
+
+    turn_limits = Budget.from_env(pricing=pricing)
     # D38: a spend limit with no price list is a number on screen that nothing
     # enforces. True of the session cap for exactly the same reason.
     if turn_limits.needs_pricing or (
@@ -475,6 +481,8 @@ def main(
         return 2
 
     print(f"session {session.session_id}  (resume with --resume={session.session_id})",
+          file=sys.stderr)
+    print(f"provider:   {provider.name} ({os.getenv(provider.name.upper() + '_MODEL') or provider.model})",
           file=sys.stderr)
     print(f"workspace:  {session.root}", file=sys.stderr)
     print(f"per turn:   {turn_limits.describe()}", file=sys.stderr)
@@ -495,6 +503,13 @@ def main(
             "will stop before calling the model. Raise one or lower the other.",
             file=sys.stderr,
         )
+
+    try:
+        warning = context_warning(ModelConfig.from_env())
+    except ModelError:
+        warning = None
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
 
     print(":help for commands, :quit or Ctrl-D to end.", file=sys.stderr)
 
