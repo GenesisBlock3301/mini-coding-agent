@@ -23,6 +23,16 @@ python -m agent.cli --resume=<run_id>     # continue a crashed run
 python -m agent.chat                      # interactive session (interlude)
 ```
 
+Against a fixture project — a fresh workspace per run, graded by a checker the
+agent cannot see:
+
+```bash
+W=$(python scripts/fixture.py build tail_window)
+python -m agent.cli --tools --workspace=$W --max-steps=8 \
+    "$(python scripts/fixture.py task tail_window)"
+python scripts/fixture.py verify tail_window --workspace=$W
+```
+
 Run `python -m agent.cli` with no task for flags, limits and exit codes.
 
 ### Providers
@@ -57,8 +67,10 @@ and warn.
 | `agent/tools.py` | Tool schemas and implementations |
 | `agent/policy.py` | Workspace boundary and limits, enforced in code |
 | `agent/tracing.py` | JSONL event traces, secrets excluded |
-| `evals/` | Task fixtures, runner, reports |
-| `playground/` | The agent's only writable workspace |
+| `evals/` | Eval runner and reports (Session 11) |
+| `fixtures/` | Fixture projects: a broken `workspace/` the agent sees, a `verify/` it does not |
+| `scripts/fixture.py` | Build, reset and verify a fixture workspace |
+| `playground/` | The default writable workspace; `--workspace=` overrides it per run |
 
 `.env` and anything real live outside `playground/`.
 
@@ -69,8 +81,9 @@ and warn.
 - [x] 3. `read_file` with size and output limits
 - [x] 4. Tool call -> execute -> tool result -> model
 - [x] 5. Multiple tool calls per response; stopping rules
-- [ ] 6. `replace_text`, exactly one match
-- [ ] 7. Read -> edit against a fixture project
+- [x] 6. `replace_text`, exactly one match
+- [~] 7. Read -> edit against a fixture project (harness, three cases, 15/15 on
+      the Phase 3 tally; Phase 4's one-variable comparison still open)
 - [ ] 8. Deliberate failure injection
 - [ ] 9. Repetition and context growth
 - [~] 10. JSONL traces (`journal.py` covers runs; `tracing.py` still a stub)

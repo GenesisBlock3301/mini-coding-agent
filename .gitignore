@@ -9,6 +9,9 @@ __pycache__/
 # Run artifacts
 evals/results/*
 !evals/results/.gitkeep
+# Session 7 fixture working copies. The TEMPLATES under fixtures/ are
+# committed and are the source of truth; these are disposable per-run copies.
+runs/workspaces/
 traces/
 *.jsonl
 

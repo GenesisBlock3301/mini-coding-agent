@@ -1,0 +1,4 @@
+Operator scratchpad.
+
+- 2026-10-02 rotated the staging token
+- 2026-10-19 limit lowered to 0 for the quiet hours experiment

@@ -488,6 +488,11 @@ def _start(
             task=_task_of(run.history),
             messages=run.history,
             budget=budget.describe(),
+            # D62. Two runs of one task are only comparable if you can tell
+            # which copy of the fixture each one edited. Since Session 7 that
+            # is no longer always ./playground, and a trace that does not say
+            # which directory it changed cannot be replayed against anything.
+            workspace=str(root),
         )
         return run
 

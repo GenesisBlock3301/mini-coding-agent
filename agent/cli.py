@@ -134,16 +134,25 @@ MAX_SECONDS_FLAG = "--max-seconds="
 MAX_TOKENS_FLAG = "--max-tokens="
 MAX_SPEND_FLAG = "--max-spend="
 RESUME_FLAG = "--resume="
+# D55. The workspace was a constant until Session 7, where two runs of the
+# same task have to start from two identical-but-separate copies of a
+# fixture. policy.workspace_root() has accepted an override since Session 2
+# precisely so this day would be a flag and not a refactor.
+WORKSPACE_FLAG = "--workspace="
 USAGE = (
     f'usage: python -m agent.cli "your task" '
     f"[{TOOLS_FLAG}] [{RAW_FLAG}] [{MAX_STEPS_FLAG}N]\n"
     f"       [{MAX_TOOL_CALLS_FLAG}N] [{MAX_SECONDS_FLAG}S] "
     f"[{MAX_TOKENS_FLAG}N] [{MAX_SPEND_FLAG}USD]\n"
+    f"       [{WORKSPACE_FLAG}DIR]\n"
     f"       python -m agent.cli {RESUME_FLAG}<run_id>      # continue a dead run\n"
     f"\nLimits default from .env (MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS,\n"
     f"MAX_TOTAL_TOKENS, MAX_SPEND, TOKEN_RESERVE); flags override them.\n"
     f"{MAX_SPEND_FLAG}USD needs PRICE_* configured in .env - an unpriced spend\n"
-    f"limit cannot be enforced, so it is refused rather than ignored."
+    f"limit cannot be enforced, so it is refused rather than ignored.\n"
+    f"{WORKSPACE_FLAG}DIR overrides the workspace for one run (default:\n"
+    f"./playground, or WORKSPACE_DIR from .env). Build a disposable one with\n"
+    f"scripts/fixture.py build <case>."
 )
 
 # Exit codes let a caller classify a failure without parsing text.
@@ -188,6 +197,9 @@ class Options:
     max_tokens: int | None = None
     max_spend: float | None = None
     resume_run_id: str | None = None
+    # A path as the user typed it. Resolving is policy.workspace_root()'s
+    # job, not argv parsing's - one place decides what a path means.
+    workspace: str | None = None
 
     def budget(self, pricing: Pricing | None) -> Budget:
         """Flags over .env over defaults. Built here so nothing downstream
@@ -241,40 +253,86 @@ def _as_int(value: float | None) -> int | None:
     return None if value is None else int(value)
 
 
+# Paired with _parse_limits. A tuple rather than five inline branches: adding
+# a limit in a later session is one line here, not another `if` in a parser
+# that SonarQube already flagged once.
+LIMIT_FLAGS = (
+    (MAX_STEPS_FLAG, "int"),
+    (MAX_TOOL_CALLS_FLAG, "int"),
+    (MAX_TOKENS_FLAG, "int"),
+    (MAX_SECONDS_FLAG, "float"),
+    (MAX_SPEND_FLAG, "float"),
+)
+
+
+def _flag_value(flags: set[str], prefix: str) -> str | None:
+    """The text after `prefix`, or None when the flag was not given.
+
+    None and "" are different answers and both matter: absent means "use the
+    default", empty means the user typed `--workspace=` and meant something.
+    """
+    return next((f[len(prefix):] for f in flags if f.startswith(prefix)), None)
+
+
+def _parse_limits(flags: set[str]) -> dict[str, float] | None:
+    """Every numeric limit on the command line, or None if any one is junk.
+
+    One bad limit rejects the WHOLE command line rather than the single flag.
+    Running with four of the five limits the user asked for is the failure
+    mode `_positive_number` exists to prevent, one level up.
+    """
+    numbers: dict[str, float] = {}
+    for prefix, kind in LIMIT_FLAGS:
+        raw = _flag_value(flags, prefix)
+        if raw is None:
+            continue
+        value = _positive_number(raw, kind)
+        if value is None:
+            return None
+        numbers[prefix] = value
+    return numbers
+
+
+def _has_task(positional: list[str], resume_run_id: str | None) -> bool:
+    """Is there something for this run to do?
+
+    Two sources, never both: a resumed run takes its task from the journal,
+    so the id is what has to be present; a fresh run needs a non-blank
+    positional argument.
+    """
+    if resume_run_id:
+        return bool(resume_run_id.strip())
+    return bool(positional) and bool(positional[0].strip())
+
+
 def parse_argv(argv: list[str]) -> Options | None:
-    """Options, or None when the task is missing, blank or --max-steps is junk.
+    """Options, or None when the task is missing, blank or a limit is junk.
 
     Flags are order-free and may sit on either side of the task. Anything that
     is not a flag is positional; only the first positional is used.
+
+    Reads as four questions, each answered by one helper: what was asked for,
+    is the workspace sane, is there a task, are the limits numbers. Keeping
+    the validation flat here is deliberate - a parser whose branches nest is
+    one where a rejected command line quietly becomes an accepted one.
     """
     flags = {a for a in argv[1:] if a.startswith("--")}
     positional = [a for a in argv[1:] if not a.startswith("--")]
 
-    resume_run_id = next(
-        (f[len(RESUME_FLAG):] for f in flags if f.startswith(RESUME_FLAG)), None
-    )
-    # A resumed run takes its task from the journal, so no task is required.
-    if resume_run_id:
-        if not resume_run_id.strip():
-            return None
-    elif not positional or not positional[0].strip():
+    resume_run_id = _flag_value(flags, RESUME_FLAG)
+    workspace = _flag_value(flags, WORKSPACE_FLAG)
+
+    # An empty value is a typo, never a request for the default. Same rule as
+    # a malformed limit: a silently corrected setting is one the user believes
+    # in and does not check.
+    if workspace is not None and not workspace.strip():
+        return None
+    if not _has_task(positional, resume_run_id):
         return None
 
-    numbers: dict[str, float] = {}
-    for prefix, kind in (
-        (MAX_STEPS_FLAG, "int"),
-        (MAX_TOOL_CALLS_FLAG, "int"),
-        (MAX_TOKENS_FLAG, "int"),
-        (MAX_SECONDS_FLAG, "float"),
-        (MAX_SPEND_FLAG, "float"),
-    ):
-        for flag in flags:
-            if not flag.startswith(prefix):
-                continue
-            value = _positive_number(flag[len(prefix):], kind)
-            if value is None:
-                return None
-            numbers[prefix] = value
+    numbers = _parse_limits(flags)
+    if numbers is None:
+        return None
 
     return Options(
         task=positional[0] if positional else "",
@@ -286,6 +344,7 @@ def parse_argv(argv: list[str]) -> Options | None:
         max_tokens=_as_int(numbers.get(MAX_TOKENS_FLAG)),
         max_spend=numbers.get(MAX_SPEND_FLAG),
         resume_run_id=resume_run_id,
+        workspace=workspace,
     )
 
 
@@ -541,6 +600,20 @@ def main(argv: list[str]) -> int:
         print(USAGE, file=sys.stderr)
         return EXIT_USAGE
 
+    # Resolved once, before anything is spent. A workspace that does not
+    # exist is not a boundary problem - every path inside it would come back
+    # not_found, which reads as a broken agent rather than a mistyped flag.
+    root = workspace_root(options.workspace)
+    if not root.is_dir():
+        print(
+            f"error [usage]: workspace {root} does not exist or is not a "
+            "directory. Create it, or build a disposable one with "
+            "`python scripts/fixture.py build <case>`.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    print(f"workspace: {root}", file=sys.stderr)
+
     # A local model is free, and "free" is a fact about the provider, not a
     # price list the environment forgot to set. See Pricing.free().
     try:
@@ -575,7 +648,7 @@ def main(argv: list[str]) -> int:
     try:
         result = run_loop(
             messages,
-            root=workspace_root(),
+            root=root,
             tools=options.tool_schemas,
             budget=budget,
             on_response=print_response,
