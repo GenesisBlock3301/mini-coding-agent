@@ -8,7 +8,14 @@ than membership.
 import pytest
 
 from agent.policy import workspace_root
-from agent.tools import MAX_BYTES, MAX_ENTRIES, ToolResult, list_files
+from agent.tools import (
+    MAX_BYTES,
+    MAX_ENTRIES,
+    SYMLINK_NOTE,
+    ToolResult,
+    list_files,
+    list_folders,
+)
 
 
 # --------------------------------------------------------------------------
@@ -81,6 +88,11 @@ def test_a_symlinked_directory_is_not_marked_as_one(tmp_path):
 
     policy.py refuses to traverse any symlink, so marking a link with a
     trailing `/` would invite the model to list something it cannot have.
+
+    Session 6 revisit: not-a-directory was never enough. Leaving it unmarked
+    made it read as a FILE, which invited read_file instead of list_files -
+    the same wasted call and the same `symlink` refusal. It is now marked as
+    what it actually is.
     """
     (tmp_path / "real_dir").mkdir()
     (tmp_path / "link_to_dir").symlink_to(tmp_path / "real_dir")
@@ -88,8 +100,48 @@ def test_a_symlinked_directory_is_not_marked_as_one(tmp_path):
     lines = list_files(".", root=tmp_path).content.splitlines()
 
     assert "real_dir/" in lines
-    assert "link_to_dir" in lines
+    assert "link_to_dir@" in lines
     assert "link_to_dir/" not in lines
+    assert "link_to_dir" not in lines  # unmarked would read as a plain file
+
+
+def test_a_symlinked_file_is_marked_too(tmp_path):
+    """The mark is about reachability, not about what is on the other end.
+
+    A link to a file inside the workspace is refused by exactly the same rule
+    as a link to a directory outside it, so it gets exactly the same mark.
+    """
+    (tmp_path / "real.py").write_text("x = 1\n")
+    (tmp_path / "link.py").symlink_to(tmp_path / "real.py")
+
+    lines = list_files(".", root=tmp_path).content.splitlines()
+
+    assert "real.py" in lines
+    assert "link.py@" in lines
+
+
+def test_the_symlink_note_appears_only_when_there_is_a_symlink(tmp_path):
+    """A standing sentence in every listing is noise paid for on every step."""
+    (tmp_path / "plain.txt").write_text("x\n")
+
+    without = list_files(".", root=tmp_path).content
+    assert "@" not in without
+
+    (tmp_path / "link.txt").symlink_to(tmp_path / "plain.txt")
+    with_link = list_files(".", root=tmp_path).content
+    assert SYMLINK_NOTE in with_link
+
+
+def test_list_folders_still_omits_symlinked_directories(tmp_path):
+    """The mark changed list_files. list_folders promises directories it can
+    actually list, so a symlink has no business appearing in it at all."""
+    (tmp_path / "real_dir").mkdir()
+    (tmp_path / "link_to_dir").symlink_to(tmp_path / "real_dir")
+
+    content = list_folders(".", root=tmp_path).content
+
+    assert "real_dir/" in content
+    assert "link_to_dir" not in content
 
 
 def test_the_root_itself_can_be_listed():

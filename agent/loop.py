@@ -106,6 +106,12 @@ class LoopResult:
     # Ids the model sent twice in one batch, or sent empty. Not an error you
     # can fix - the provider matches on the id it chose - but never silent.
     malformed_call_ids: list[str] = field(default_factory=list)
+    # Session 6, D52. Workspace-relative paths this run actually changed, in
+    # the order they were changed, one entry per successful edit - so a file
+    # edited twice appears twice. The plan's rule for limits is "stop
+    # explicitly when a limit is reached, AND REPORT CHANGES ALREADY MADE";
+    # until this session there were never any changes to report.
+    changed_paths: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -226,6 +232,8 @@ class _Run:
     responses: list[ModelResponse] = field(default_factory=list)
     # Ids the model sent twice in one batch, or sent empty.
     malformed: list[str] = field(default_factory=list)
+    # D52. Appended only by _answer, only when a tool reported a change.
+    changed: list[str] = field(default_factory=list)
 
     # ---- one model call ---------------------------------------------------
 
@@ -376,12 +384,27 @@ class _Run:
         """
         message = tool_message(call, result)
         self.history.append(message)
+
+        # D51/D52. Collected HERE rather than in _dispatch, because _answer is
+        # the single point every result passes through - including a refusal,
+        # which must never add a path. A tool that did not succeed changed
+        # nothing, so there is nothing to collect.
+        if result.changed_path is not None:
+            self.changed.append(result.changed_path)
+
         self._journal(
             TOOL_OUTCOME,
             step=self.step,
             call_id=call.get("id") or "",
             ok=result.ok,
             error_code=result.error_code,
+            # D51. The journal's record SHAPE does not change; what it means
+            # does. Before Session 6 a tool_outcome said "a read happened".
+            # Now this field is what makes "did the file change?" answerable
+            # from the trace alone - and it is written after the rename, so a
+            # tool_intent with no tool_outcome means the edit did not land.
+            # That is a guarantee the atomic write makes, not the journal.
+            changed_path=result.changed_path,
             message=message,
             **extra,
         )
@@ -414,6 +437,7 @@ class _Run:
             ledger=self.ledger,
             budget=self.budget,
             malformed_call_ids=self.malformed,
+            changed_paths=self.changed,
         )
 
     def _journal(self, event: str, **fields: Any) -> None:

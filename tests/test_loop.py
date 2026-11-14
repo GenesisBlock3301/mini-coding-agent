@@ -6,6 +6,7 @@ no network, no sockets. The assertions that matter most are the ones about
 session exists to prevent, and only a call count can see the difference.
 """
 
+import json
 import time
 
 import pytest
@@ -347,3 +348,105 @@ def test_a_resumed_run_inherits_the_tool_calls_too(workspace):
 
     assert model.calls == 0
     assert result.stop_reason == STOP_TOOL_LIMIT
+
+
+# --------------------------------------------------------------------------
+# Session 6, step 10: a stopped run must still say what it changed (D52).
+# --------------------------------------------------------------------------
+
+
+def edit(call_id: str, path: str, old: str, new: str):
+    return call(
+        call_id,
+        name="replace_text",
+        arguments=json.dumps({"path": path, "old": old, "new": new}),
+    )
+
+
+def test_a_successful_edit_is_reported(workspace):
+    model = ScriptedModel(wants(edit("c1", "a.txt", "alpha", "ALPHA")), says("done"))
+
+    result = run_loop([], root=workspace, model_fn=model)
+
+    assert result.changed_paths == ["a.txt"]
+    assert (workspace / "a.txt").read_bytes() == b"ALPHA\n"
+
+
+def test_a_refused_edit_adds_nothing_to_the_report(workspace):
+    model = ScriptedModel(wants(edit("c1", "a.txt", "nowhere", "x")), says("done"))
+
+    result = run_loop([], root=workspace, model_fn=model)
+
+    assert result.changed_paths == []
+
+
+def test_a_run_stopped_by_the_tool_cap_still_names_what_it_edited(workspace):
+    """The answer to Session 5's self-test question, as a test.
+
+    Two edits in one batch, one tool call left in the budget. The first lands,
+    the second is refused by the budget and never runs - and the run must
+    still report the file that was already changed. A user who cannot tell
+    which files a stopped agent touched will not run it a second time.
+    """
+    model = ScriptedModel(
+        wants(
+            edit("c1", "a.txt", "alpha", "ALPHA"),
+            edit("c2", "b.txt", "beta", "BETA"),
+        )
+    )
+
+    result = run_loop(
+        [], root=workspace, model_fn=model, budget=Budget(max_tool_calls=1)
+    )
+
+    assert result.stop_reason == STOP_TOOL_LIMIT
+    # The first edit stands...
+    assert (workspace / "a.txt").read_bytes() == b"ALPHA\n"
+    # ...the second never ran...
+    assert (workspace / "b.txt").read_bytes() == b"beta\n"
+    # ...both ids were answered, which is Session 5's invariant...
+    assert [m["tool_call_id"] for m in tool_messages(result)] == ["c1", "c2"]
+    # ...and the run reports the partial change rather than hiding it.
+    assert result.changed_paths == ["a.txt"]
+
+
+def test_the_same_file_edited_twice_is_reported_twice(workspace):
+    """One entry per successful edit. "Twice" is information: the second edit
+    was matched against a file the first had already changed."""
+    model = ScriptedModel(
+        wants(
+            edit("c1", "a.txt", "alpha", "ALPHA"),
+            edit("c2", "a.txt", "ALPHA", "OMEGA"),
+        ),
+        says("done"),
+    )
+
+    result = run_loop([], root=workspace, model_fn=model)
+
+    assert result.changed_paths == ["a.txt", "a.txt"]
+    assert (workspace / "a.txt").read_bytes() == b"OMEGA\n"
+
+
+def test_the_journal_says_which_file_an_outcome_changed(workspace, tmp_path):
+    """D51. The record SHAPE did not change; what it means did.
+
+    Before this session a tool_outcome meant "a read happened". The field
+    below is what makes "did the file change?" answerable from the trace
+    alone - and because it is written only after the atomic rename, a
+    tool_intent with no tool_outcome means the edit did not land.
+    """
+    from agent.journal import TOOL_OUTCOME, Journal, new_run_id
+
+    journal = Journal.create(tmp_path / "runs", new_run_id())
+    model = ScriptedModel(
+        wants(
+            edit("c1", "a.txt", "alpha", "ALPHA"),
+            edit("c2", "b.txt", "nowhere", "x"),
+        ),
+        says("done"),
+    )
+
+    run_loop([], root=workspace, model_fn=model, journal=journal)
+
+    outcomes = [e for e in journal.events() if e["t"] == TOOL_OUTCOME]
+    assert [e["changed_path"] for e in outcomes] == ["a.txt", None]

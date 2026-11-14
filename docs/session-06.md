@@ -37,7 +37,7 @@ That question is now due.
 
 | #   | Decision                                   | Options                                                           | My pick + why |
 |-----|--------------------------------------------|-------------------------------------------------------------------|---------------|
-| D41 | How `dispatch` validates arguments         | keep the hardcoded `path` / a per-tool spec / derive from the schema |               |
+| D41 | How `dispatch` validates arguments         | keep the hardcoded `path` / a per-tool spec / **derive from the schema** | **Derive from `TOOL_SCHEMAS`.** The schemas already carry `required` and `additionalProperties: False`, so a separate validator would be copying information that is already written down — and the day the two disagree, the tool rejects an argument the model was *told* to send. Cost is a small schema walker over the subset I actually use (`type: object`, `properties`, `required`, string types); anything outside that subset fails at import, not at call time. |
 | D42 | How the new bytes land on disk             | truncate in place / temp file + atomic rename / write beside, then swap |               |
 | D43 | What `old` has to match                    | exact bytes / whitespace-insensitive / fuzzy with a threshold      |               |
 | D44 | Staleness: must the model have read it first | no check / re-read at write time / model sends a hash it must match |               |
@@ -46,7 +46,7 @@ That question is now due.
 | D47 | What a successful result tells the model   | "ok" / the match count / the changed line / a diff                 |               |
 | D48 | `old` empty, or `old == new`               | reject both / allow the no-op / reject only the empty one          |               |
 | D49 | May `replace_text` create a file           | yes, if missing / no, edits only                                   |               |
-| D50 | May it edit the same file twice in one batch | yes / refuse the second / yes but report it                        |               |
+| D50 | May it edit the same file twice in one batch | yes / refuse the second / yes but report it                        | **Still open — but no longer a feature.** Session 5's `run_pending` already executes every call in a response, so two `replace_text` calls to one file arrive together whether or not I build anything. What is left to decide is ordering and reporting, not capability. Leaning: run them in order, each matched against the file *as it stands*, both ids answered, and D52 names the file once. |
 | D51 | What the journal records about a write     | same fields as a read / + byte counts / + a hash before and after  |               |
 | D52 | What the CLI prints after a run that edited | nothing new / the files touched / the files touched on every stop  |               |
 
@@ -242,17 +242,63 @@ last two rows — a workspace that is byte-identical afterwards.
 
 ## D. Brainstorming space
 
+**Scope decision taken before Phase 0:** this session builds a **single-edit** tool —
+one `old`/`new` pair per call, exactly one match. The multi-edit shape (several pairs
+applied to one file atomically) is deliberately deferred until after all 14 sessions.
+Adding it now would hand the model an escape hatch from a one-match refusal, and
+widening its anchor instead *is* the behaviour Session 11 is supposed to measure.
+Note this is about the tool, not the response: the loop can still receive two
+`replace_text` calls in one turn — see D50.
+
 Things I haven't decided:
 
--
+- **D50's ordering and reporting rule.** Not whether to allow two edits to one file
+  in a batch — `run_pending` already does that — but what the second one is matched
+  against and how the report names a file touched twice.
+- **Which registry owns "does this tool exist".** `TOOLS` and `TOOL_SCHEMAS` are two
+  tables keyed by the same names, and `dispatch` checks `TOOLS` first — so a tool
+  with a schema and no implementation answers `unknown_tool`. Merge them, or keep
+  them apart and test that they agree? D41 made the schema authoritative for
+  *arguments* and left *existence* where it was.
+- **Which error wins when a call is wrong in two ways at once.** An object can carry
+  an argument I never defined *and* omit a required one. `tests/test_list_folders.py:181`
+  sends exactly that (`{"recursive": true}`) and currently expects `recursive` to be
+  named. Whatever I pick has to be deterministic — same input, same message, every
+  run. Smallest instance of self-test #8.
+- Everything from D42 onward. D41 is the only decision closed so far.
 
 Things that surprised me:
 
--
+- **The real Claude Code edit tool is this exact shape.** Exact string match, must be
+  unique, refuses otherwise — no line numbers, no diff format, no fuzzy fallback.
+  Session 6's milestone is not a simplified teaching version of the real thing.
+- **"Editing several places at once" is not a tool feature.** It is N `tool_use`
+  blocks in one assistant message — the same protocol Session 5 already implements.
+  Multi-file is the same thing with different `path`s. Nothing in the *tool* knows.
+- **The model writes every block before it sees a single result.** It cannot look at
+  the file between edit 1 and edit 2, so it has to predict the intermediate state.
+  That is why non-overlapping anchors matter, and it is a model-behaviour property,
+  not something the tool enforces.
+- **A Session 2 decision had a second half nobody had written down.** `_scan`
+  counted a symlink as a file so the model would not try to *list* it - and by
+  leaving it unmarked, invited the model to *read* it instead. Same wasted
+  call, same `symlink` refusal, one tool along. Asked "give me the files
+  here", the agent truthfully listed two directories, because nothing in the
+  listing said otherwise. Symlinks now carry an `@` mark (`ls -F`'s), with a
+  note that appears only when one is present. Revisits session-02 D5.
+- **The schemas already contained the validator.** `required` and
+  `additionalProperties: False` were written down in Session 4 for the model's
+  benefit; D41 was less a new design than noticing I had already specified it once.
 
 Questions for review:
 
--
+- If `dispatch` calls tools as `TOOLS[name](**parsed, root=root)`, the Python
+  parameter names silently become part of the contract. Is a test that walks `TOOLS`
+  and compares signatures against schemas enough, or does that want to be structural?
+- Does a schema-driven validator stay small, or is this the first step of writing a
+  JSON Schema implementation by accident? What is the trigger to stop?
+- When Step 1 is green, have `list_files`, `list_folders` and `read_file` really come
+  through unchanged — or only unchanged in the ways my existing tests happen to assert?
 
 ---
 
@@ -294,6 +340,11 @@ one.
 - **No undo.** The journal records what was asked for, not what was overwritten
   (unless D51 says otherwise). `git` in the playground is your undo, and the fixtures
   are disposable on purpose.
+- **One edit per call, by choice.** There is no way to apply several replacements in
+  one atomic operation. A model wanting three changes to one file sends three calls,
+  and nothing makes that group all-or-nothing — if the third is refused, the first two
+  stand. The multi-pair shape that would close this is a post-course extension, and
+  until it exists D52's report is what keeps a partial application honest.
 - **One match is a rule, not a guarantee of correctness.** A unique match in the
   wrong function is still a unique match. The tool guarantees that the edit is
   unambiguous, never that it is right — which is the whole reason Session 11's

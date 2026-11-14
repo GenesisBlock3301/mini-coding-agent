@@ -211,6 +211,41 @@ class ResumeState:
         return not self.answer_ready and not self.unanswered_calls
 
 
+def _apply_model_result(state: ResumeState, event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Fold one model_result into the state. Returns the tool calls it asked for.
+
+    Split out of `rebuild` so the event loop there stays a flat table of
+    "which kind is this" rather than a table with two long paragraphs in it.
+    """
+    state.model_call_was_in_flight = False
+    message = event.get("message") or {}
+    state.messages.append(message)
+    state.steps_done += 1
+
+    usage = event.get("usage") or {}
+    state.prompt_tokens += usage.get("prompt_tokens", 0)
+    state.completion_tokens += usage.get("completion_tokens", 0)
+    state.cache_hit_tokens += usage.get("prompt_cache_hit_tokens", 0)
+    state.cache_miss_tokens += usage.get("prompt_cache_miss_tokens", 0)
+
+    tool_calls = list(message.get("tool_calls") or [])
+    # A turn with no tool calls IS the answer. Nothing more is owed.
+    state.answer_ready = not tool_calls
+    state.answer_text = message.get("content") if state.answer_ready else None
+    return tool_calls
+
+
+def _apply_tool_outcome(state: ResumeState, event: dict[str, Any]) -> str:
+    """Fold one tool_outcome in. Returns the call_id it answered."""
+    state.messages.append(event.get("message") or {})
+    state.replayed_tools += 1
+    # Refused calls consumed no tool budget - they never ran - but every
+    # executed one did, and that spend belongs to the run.
+    if not event.get("refused"):
+        state.tool_calls_done += 1
+    return event.get("call_id", "")
+
+
 def rebuild(events: list[dict[str, Any]]) -> ResumeState:
     """Replay the journal into the history the dead process had in RAM.
 
@@ -244,30 +279,11 @@ def rebuild(events: list[dict[str, Any]]) -> ResumeState:
         elif kind == MODEL_PENDING:
             state.model_call_was_in_flight = True
         elif kind == MODEL_RESULT:
-            state.model_call_was_in_flight = False
-            message = event.get("message") or {}
-            state.messages.append(message)
-            state.steps_done += 1
-            usage = event.get("usage") or {}
-            state.prompt_tokens += usage.get("prompt_tokens", 0)
-            state.completion_tokens += usage.get("completion_tokens", 0)
-            state.cache_hit_tokens += usage.get("prompt_cache_hit_tokens", 0)
-            state.cache_miss_tokens += usage.get("prompt_cache_miss_tokens", 0)
-            last_tool_calls = list(message.get("tool_calls") or [])
-            # A turn with no tool calls IS the answer. Nothing more is owed.
-            state.answer_ready = not last_tool_calls
-            state.answer_text = message.get("content") if state.answer_ready else None
+            last_tool_calls = _apply_model_result(state, event)
         elif kind == TOOL_INTENT:
             intents.append(event.get("call_id", ""))
         elif kind == TOOL_OUTCOME:
-            call_id = event.get("call_id", "")
-            outcomes.add(call_id)
-            state.messages.append(event.get("message") or {})
-            state.replayed_tools += 1
-            # Refused calls consumed no tool budget - they never ran - but
-            # every executed one did, and that spend belongs to the run.
-            if not event.get("refused"):
-                state.tool_calls_done += 1
+            outcomes.add(_apply_tool_outcome(state, event))
         elif kind == RUN_FINISHED:
             state.finished = True
 

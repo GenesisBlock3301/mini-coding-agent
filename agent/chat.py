@@ -438,57 +438,41 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
         print(result.text)
 
 
-def main(
-    argv: list[str] | None = None,
-    *,
-    model_fn: Callable = call_model,
-    read_line: Callable[[str], str] = input,
-) -> int:
-    """`model_fn` and `read_line` are injected so the whole session is
-    testable with no key and no network - the same seam run_loop offers."""
-    load_dotenv()
-
+def _parse_resume_flag(argv: list[str] | None) -> tuple[str | None, bool]:
+    """(resume_id, ok). `ok` is False when an argument was not understood."""
     resume_id: str | None = None
     for argument in (argv or [])[1:]:
-        if argument.startswith(RESUME_FLAG):
-            resume_id = argument[len(RESUME_FLAG) :]
-        else:
-            print(USAGE, file=sys.stderr)
-            return 2
+        if not argument.startswith(RESUME_FLAG):
+            return None, False
+        resume_id = argument[len(RESUME_FLAG) :]
+    return resume_id, True
 
-    try:
-        provider = active_provider()
-    except ModelError as err:
-        return report_model_error(err)
-    pricing = Pricing.free() if provider.free else Pricing.from_env()
 
-    turn_limits = Budget.from_env(pricing=pricing)
-    # D38: a spend limit with no price list is a number on screen that nothing
-    # enforces. True of the session cap for exactly the same reason.
-    if turn_limits.needs_pricing or (
+def _spend_limit_without_prices(turn_limits: Budget) -> bool:
+    """D38: a spend limit with no price list is a number on screen that
+    nothing enforces. True of the session cap for exactly the same reason."""
+    return turn_limits.needs_pricing or (
         _env_float("MAX_SESSION_SPEND") is not None and turn_limits.pricing is None
-    ):
-        print(
-            "error [usage]: a spend limit needs prices. Set "
-            "PRICE_INPUT_CACHE_HIT_PER_M, PRICE_INPUT_CACHE_MISS_PER_M and "
-            "PRICE_OUTPUT_PER_M in .env.",
-            file=sys.stderr,
-        )
-        return 2
+    )
 
-    session = start_session(turn_limits, workspace_root(), resume_id)
-    if session is None:
-        return 2
 
-    print(f"session {session.session_id}  (resume with --resume={session.session_id})",
-          file=sys.stderr)
-    print(f"provider:   {provider.name} ({os.getenv(provider.name.upper() + '_MODEL') or provider.model})",
-          file=sys.stderr)
+def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
+    """Everything printed once, before the first prompt."""
+    model = os.getenv(provider.name.upper() + "_MODEL") or provider.model
+    print(
+        f"session {session.session_id}  (resume with --resume={session.session_id})",
+        file=sys.stderr,
+    )
+    print(f"provider:   {provider.name} ({model})", file=sys.stderr)
     print(f"workspace:  {session.root}", file=sys.stderr)
     print(f"per turn:   {turn_limits.describe()}", file=sys.stderr)
-    print(f"per session: tokens<={session.max_session_tokens or 'unlimited'} "
-          f"spend<={session.max_session_spend or 'unlimited'} "
-          f"context<={session.max_context_tokens}", file=sys.stderr)
+    print(
+        f"per session: tokens<={session.max_session_tokens or 'unlimited'} "
+        f"spend<={session.max_session_spend or 'unlimited'} "
+        f"context<={session.max_context_tokens}",
+        file=sys.stderr,
+    )
+
     # Found by writing the tests, not by reasoning about it: check_before_step
     # compares tokens-so-far PLUS the reserve against the cap, so a session
     # token budget at or below the reserve refuses every turn before a single
@@ -513,22 +497,36 @@ def main(
 
     print(":help for commands, :quit or Ctrl-D to end.", file=sys.stderr)
 
-    while True:
-        try:
-            task = read_line(PROMPT).strip()
-        except EOFError:
-            print(file=sys.stderr)
-            break
-        except KeyboardInterrupt:
-            print("\n(:quit or Ctrl-D to end)", file=sys.stderr)
-            continue
 
+def _read_task(read_line: Callable[[str], str]) -> str | None:
+    """One line from the user, or None to end the session.
+
+    Ctrl-C returns "" (keep going), Ctrl-D and EOF return None (stop). Those
+    two have to be told apart, which is the only reason this is a function
+    and not an expression.
+    """
+    try:
+        return read_line(PROMPT).strip()
+    except EOFError:
+        print(file=sys.stderr)
+        return None
+    except KeyboardInterrupt:
+        print("\n(:quit or Ctrl-D to end)", file=sys.stderr)
+        return ""
+
+
+def _repl(session: Session, model_fn: Callable, read_line: Callable[[str], str]) -> None:
+    """The prompt loop. Returns when the user ends the session."""
+    while True:
+        task = _read_task(read_line)
+        if task is None:
+            return
         if not task:
             continue
 
         if task.startswith(":"):
             if not run_command(task, session):
-                break
+                return
             continue
 
         refusal = session.refusal()
@@ -537,6 +535,45 @@ def main(
             continue
 
         take_turn(session, task, model_fn)
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    model_fn: Callable = call_model,
+    read_line: Callable[[str], str] = input,
+) -> int:
+    """`model_fn` and `read_line` are injected so the whole session is
+    testable with no key and no network - the same seam run_loop offers."""
+    load_dotenv()
+
+    resume_id, ok = _parse_resume_flag(argv)
+    if not ok:
+        print(USAGE, file=sys.stderr)
+        return 2
+
+    try:
+        provider = active_provider()
+    except ModelError as err:
+        return report_model_error(err)
+    pricing = Pricing.free() if provider.free else Pricing.from_env()
+
+    turn_limits = Budget.from_env(pricing=pricing)
+    if _spend_limit_without_prices(turn_limits):
+        print(
+            "error [usage]: a spend limit needs prices. Set "
+            "PRICE_INPUT_CACHE_HIT_PER_M, PRICE_INPUT_CACHE_MISS_PER_M and "
+            "PRICE_OUTPUT_PER_M in .env.",
+            file=sys.stderr,
+        )
+        return 2
+
+    session = start_session(turn_limits, workspace_root(), resume_id)
+    if session is None:
+        return 2
+
+    _print_banner(session, provider, turn_limits)
+    _repl(session, model_fn, read_line)
 
     print(f"[session {session.session_id}] {session.describe()}", file=sys.stderr)
     return 0

@@ -67,18 +67,59 @@ SYSTEM_PROMPT = "You are a terse assistant."
 # delete this paragraph and the agent can do exactly the same set of things,
 # just less gracefully. See docs/session-04.md E1.
 #
-# The last two sentences are the optimistic-path rule: guess, then recover.
-# Without them the model spends its first call on list_files('.') to find out
-# where things live. See docs/session-04.md E2.
+# The optimistic-path sentences ("treat that name as a workspace-relative
+# path...") are guess-then-recover. Without them the model spends its first
+# call on list_files('.') to find out where things live. See session-04 E2.
+#
+# Session 6. Two rules about editing live here and NOT in replace_text's
+# schema, because they are about SEQUENCING TOOLS - no single schema owns
+# "read before you edit". Everything true of replace_text alone (exactly one
+# match, copy verbatim, cannot create a file) stays in its schema
+# description, where it travels with the tool and cannot go stale when the
+# next one is added. This prompt already went stale once: it claimed two
+# tools after list_folders made it three.
+#
+# The test for any sentence added here: delete it, and does the agent become
+# UNABLE to do something, or merely slower? Slower belongs here. Unable means
+# a boundary was written in prose, and prose is not a boundary.
+#
+# The "every file" sentence is CONDITIONAL on purpose. An unconditional "always
+# descend" would cost six tool calls for every listing question, and against a
+# 5000-entry directory it would spend the budget to produce a knowingly partial
+# answer. The model asking "which folder?" is the right default; this gives it
+# a way to recognise when the user already said "all of them".
+#
+# It NAMES THE PHRASES rather than describing the category. The first version
+# said "when a question is about every file rather than one directory", and it
+# never fired: asked for "all files not folders" the model read that as "the
+# entries here, minus the folders" - a fair reading, and not the category the
+# rule described. A rule the model has to agree with your taxonomy to apply is
+# a hint, not a rule. Quote the words the user will actually type.
+#
+# The truncation half is not politeness. list_files caps at MAX_ENTRIES/
+# MAX_BYTES and footers the fact, and a model that reads the footer and then
+# presents 200 of 5000 names as the answer is worse than one that refused -
+# the user cannot see the cap, only the list.
 TOOLS_SYSTEM_PROMPT = (
-    "You are a terse coding assistant with two tools: list_files and "
-    "read_file. All paths are relative to a workspace root - never absolute, "
-    "never outside it. Call a tool when the answer depends on what is "
-    "actually on disk. "
+    "You are a terse coding assistant with four tools: list_files, "
+    "list_folders, read_file and replace_text. All paths are relative to a "
+    "workspace root - never absolute, never outside it. Call a tool when the "
+    "answer depends on what is actually on disk. "
     "When the user names a file or folder, treat that name as a "
     "workspace-relative path and call the tool on it directly - do not list "
     "the root first to go looking for it. Only list a parent directory if "
-    "the path you tried is reported missing."
+    "the path you tried is reported missing. "
+    "Always read a file before you edit it, and copy the text for 'old' "
+    "verbatim from what read_file showed you, including indentation. "
+    "Make one change per replace_text call. "
+    "\"All files\", \"every file\" or \"the files\" with no directory named "
+    "means files ANYWHERE in the workspace, not only the root one. Answer "
+    "those by calling list_folders, then list_files on every subdirectory it "
+    "returns, all in a single batch - never from the root listing alone. If "
+    "a listing says it was truncated, say so in your answer instead of "
+    "presenting a partial list as complete. "
+    "When you have finished, state exactly which files you changed and what "
+    "you changed in each."
 )
 
 # Named once so the parser, the usage line and the debug presets below cannot
@@ -386,6 +427,27 @@ def report_totals(result: LoopResult) -> None:
             file=sys.stderr,
         )
 
+    # Session 6, D52. Printed from report_totals, which runs on EVERY stop -
+    # a limit, a crash-stop, or a clean answer. A user who cannot tell which
+    # files a stopped agent touched will not run it a second time, and the
+    # stop they most need this for is the one where the agent did not get to
+    # explain itself.
+    #
+    # Ordered by first touch, de-duplicated for reading, with the repeat count
+    # kept: "twice" is information, because the second edit was matched
+    # against a file the first had already changed.
+    if result.changed_paths:
+        counts: dict[str, int] = {}
+        for changed in result.changed_paths:
+            counts[changed] = counts.get(changed, 0) + 1
+        print(
+            f"  changed {len(counts)} file(s): "
+            + ", ".join(
+                name + (f" (x{n})" if n > 1 else "") for name, n in counts.items()
+            ),
+            file=sys.stderr,
+        )
+
 
 def explain_limit(result: LoopResult) -> str:
     """Why this run stopped, in the units the user set the limit in."""
@@ -423,6 +485,54 @@ def report_raw(response: ModelResponse) -> None:
     print(json.dumps(response.raw, indent=2), file=sys.stderr)
 
 
+def _open_resumed_run(run_id: str) -> tuple[Journal, ResumeState] | int:
+    """Reopen a dead run's journal and replay it, or return an exit code.
+
+    Split out of main so the two failure modes a resume has - no journal, and
+    a journal that cannot be parsed - do not nest two try blocks inside the
+    branch that only exists to choose between resuming and starting.
+    """
+    try:
+        journal = Journal.open(RUNS_DIR, run_id)
+    except FileNotFoundError as err:
+        print(f"error [no_journal]: {err}", file=sys.stderr)
+        return EXIT_USAGE
+    print(f"resuming run {run_id}", file=sys.stderr)
+
+    # Explicit, not left to the first append: a repair that discards bytes is
+    # a fact about the crash and belongs on screen, not in silence.
+    discarded = journal.heal()
+    if discarded:
+        print(
+            f"  repaired: dropped {discarded} bytes of a torn final record "
+            "(the event it described never completed)",
+            file=sys.stderr,
+        )
+
+    try:
+        resume = rebuild(journal.events())
+    except JournalCorrupt as err:
+        print(f"error [journal_corrupt]: {err}", file=sys.stderr)
+        return EXIT_USAGE
+
+    report_resume(resume)
+    return journal, resume
+
+
+def _start_new_run(options, budget: Budget, provider) -> tuple[Journal, list[dict]]:
+    """A fresh journal and the opening two messages."""
+    run_id = new_run_id()
+    journal = Journal.create(RUNS_DIR, run_id)
+    # Printed FIRST: after a crash this line is the only way back in.
+    print(f"run {run_id}  (resume with --resume={run_id})", file=sys.stderr)
+    print(f"budget: {budget.describe()}", file=sys.stderr)
+    _warn_about_context(provider)
+    return journal, [
+        {"role": "system", "content": options.system_prompt},
+        {"role": "user", "content": options.task},
+    ]
+
+
 def main(argv: list[str]) -> int:
     load_dotenv()
 
@@ -455,41 +565,12 @@ def main(argv: list[str]) -> int:
     resume: ResumeState | None = None
 
     if options.resume_run_id:
-        try:
-            journal = Journal.open(RUNS_DIR, options.resume_run_id)
-        except FileNotFoundError as err:
-            print(f"error [no_journal]: {err}", file=sys.stderr)
-            return EXIT_USAGE
-        print(f"resuming run {options.resume_run_id}", file=sys.stderr)
-
-        # Explicit, not left to the first append: a repair that discards bytes
-        # is a fact about the crash and belongs on screen, not in silence.
-        discarded = journal.heal()
-        if discarded:
-            print(
-                f"  repaired: dropped {discarded} bytes of a torn final record "
-                "(the event it described never completed)",
-                file=sys.stderr,
-            )
-
-        try:
-            resume = rebuild(journal.events())
-        except JournalCorrupt as err:
-            print(f"error [journal_corrupt]: {err}", file=sys.stderr)
-            return EXIT_USAGE
-
-        report_resume(resume)
+        opened = _open_resumed_run(options.resume_run_id)
+        if isinstance(opened, int):
+            return opened
+        journal, resume = opened
     else:
-        run_id = new_run_id()
-        journal = Journal.create(RUNS_DIR, run_id)
-        # Printed FIRST: after a crash this line is the only way back in.
-        print(f"run {run_id}  (resume with --resume={run_id})", file=sys.stderr)
-        print(f"budget: {budget.describe()}", file=sys.stderr)
-        _warn_about_context(provider)
-        messages = [
-            {"role": "system", "content": options.system_prompt},
-            {"role": "user", "content": options.task},
-        ]
+        journal, messages = _start_new_run(options, budget, provider)
 
     try:
         result = run_loop(
