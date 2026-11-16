@@ -59,6 +59,12 @@ class Provider:
     requires_key: bool
     read_timeout: float
     free: bool
+    # Session 9, D86. How much history this provider will accept in one
+    # request. A default, not a measurement: `CONTEXT_WINDOW` in .env
+    # overrides it, and for Ollama the number actually SERVED can be far
+    # lower than the model's - which is what context_warning() below exists
+    # to shout about, because the server truncates instead of refusing.
+    context_window: int
 
 
 PROVIDERS = {
@@ -69,6 +75,7 @@ PROVIDERS = {
         requires_key=True,
         read_timeout=DEFAULT_READ_TIMEOUT_S,
         free=False,
+        context_window=65_536,
     ),
     # Ollama's OpenAI-compatible endpoint. The read timeout is not a typo:
     # a 9B model with thinking enabled took 155s for its first call on an
@@ -81,6 +88,10 @@ PROVIDERS = {
         requires_key=False,
         read_timeout=600.0,
         free=True,
+        # What we TELL people to serve, not what a default `ollama serve`
+        # gives you (4096). The gap between the two is the whole reason
+        # context_warning exists.
+        context_window=MIN_USEFUL_CONTEXT,
     ),
 }
 
@@ -124,8 +135,16 @@ class ModelError(Exception):
 
     kind          what went wrong, for code to branch on
     user_message  the one line a human reads
-    retryable     should Session 8's backoff try again?
-    safe_to_retry did the request definitely NOT reach the server?
+    retryable     should the backoff try again? A fact about the ERROR.
+    safe_to_retry did the request definitely NOT reach the server? A fact
+                  about the WORLD - the only flag here that can cost a file,
+                  because resending a request that already arrived can apply
+                  an edit twice. See agent/retry.py, D69.
+    retry_after   seconds the provider asked us to wait, when it said so.
+    attempts      how many times this request was actually sent. Set by the
+                  loop when it gives up, so the CLI can say "after 3
+                  attempts" instead of reporting the last failure as if it
+                  were the only one.
     """
 
     def __init__(
@@ -137,6 +156,7 @@ class ModelError(Exception):
         safe_to_retry: bool,
         status_code: int | None = None,
         detail: str | None = None,
+        retry_after: float | None = None,
     ) -> None:
         super().__init__(user_message)
         self.kind = kind
@@ -145,6 +165,11 @@ class ModelError(Exception):
         self.safe_to_retry = safe_to_retry
         self.status_code = status_code
         self.detail = detail
+        self.retry_after = retry_after
+        # Mutable, and the only mutable thing on this exception. The number is
+        # not known where the error is built - it is known by the code that
+        # decided to stop sending.
+        self.attempts = 1
 
 
 @dataclass(frozen=True)
@@ -231,6 +256,24 @@ def _provider_detail(response: httpx.Response) -> str:
     return str(body)[:500]
 
 
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    """The Retry-After header as seconds, or None.
+
+    Only the numeric form is read. The HTTP-date form is legal and rare, and
+    parsing it means trusting the provider's clock against ours - a skewed
+    date would produce a wait of hours or of zero, both worse than falling
+    back to our own backoff. A header we cannot read is not an error here.
+    """
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except ValueError:
+        return None
+    return seconds if seconds >= 0 else None
+
+
 def _classify_status(response: httpx.Response, provider: str = "the provider") -> ModelError:
     """Map a non-200 response onto one of your failure kinds."""
     status = response.status_code
@@ -271,6 +314,7 @@ def _classify_status(response: httpx.Response, provider: str = "the provider") -
             safe_to_retry=True,
             status_code=status,
             detail=detail,
+            retry_after=_retry_after_seconds(response),
         )
     if status >= 500:
         return ModelError(
@@ -280,6 +324,9 @@ def _classify_status(response: httpx.Response, provider: str = "the provider") -
             safe_to_retry=True,
             status_code=status,
             detail=detail,
+            # 503 carries one as often as 429 does, and a server that names a
+            # wait knows more about its own recovery than our curve does.
+            retry_after=_retry_after_seconds(response),
         )
     # A code you have not met yet (403 tomorrow). Degrade by range, never crash.
     return ModelError(

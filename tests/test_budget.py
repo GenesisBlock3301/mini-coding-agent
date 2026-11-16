@@ -208,5 +208,6 @@ def test_describe_shows_every_active_limit():
     )
 
     assert budget.describe() == (
-        "steps<=3 tools<=4 30s tokens<=1000(+200 held) spend<=$0.0100"
+        "steps<=3 tools<=4 30s tokens<=1000(+200 held) spend<=$0.0100 "
+        "repeat<=3/5 ctx<=65536"
     )

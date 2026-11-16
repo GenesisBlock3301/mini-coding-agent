@@ -30,6 +30,11 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from agent.repetition import (
+    DEFAULT_MAX_REPEATED_CALLS,
+    DEFAULT_MAX_REPEATED_FAILURES,
+)
+
 DEFAULT_MAX_STEPS = 5
 
 # Why a default at all: five steps of a 60s read timeout is a five-minute run
@@ -43,6 +48,17 @@ DEFAULT_MAX_SECONDS = 300.0
 # is the entire argument for checking before the call instead of after it.
 DEFAULT_TOKEN_RESERVE = 2_000
 
+# Session 9, D86. The window the HISTORY has to fit in, which is a different
+# quantity from max_total_tokens: the wallet counts every token the run has
+# ever spent, the window counts the ones travelling in the next request. A
+# run can be well inside its budget and still too big to send.
+#
+# The default is DeepSeek's, because that is the provider this was built
+# against; `CONTEXT_WINDOW` in .env overrides it and the CLI passes the
+# selected provider's own figure. Not a guess that silently goes stale - a
+# configured default with two ways to correct it.
+DEFAULT_CONTEXT_WINDOW = 65_536
+
 # Stop reasons. Strings, not an enum: they are written to JSONL journals that
 # outlive this process and are read by Session 11's evaluator, which should
 # not have to import this module to understand a run.
@@ -52,6 +68,16 @@ STOP_TOOL_LIMIT = "tool_limit"
 STOP_TIME_LIMIT = "time_limit"
 STOP_TOKEN_LIMIT = "token_limit"
 STOP_SPEND_LIMIT = "spend_limit"
+# Session 9, D81 and D88. Two new reasons rather than reuse of an old one.
+# `tool_limit` would have been the cheap option and it lies in a specific
+# way: Session 12 compares arms by stop reason, and "the agent went in
+# circles" and "the agent ran out of tool calls" are the two outcomes that
+# session exists to tell apart. Both are LIMIT stops - an incomplete run with
+# an exit code (D88), not an answer - because a run that stopped repeating
+# itself has not finished the task, and reporting it as a normal answer is
+# the "claimed success" failure Session 7 built a verifier to catch.
+STOP_REPETITION = "repetition"
+STOP_CONTEXT_LIMIT = "context_limit"
 
 LIMIT_STOPS = (
     STOP_STEP_LIMIT,
@@ -59,6 +85,8 @@ LIMIT_STOPS = (
     STOP_TIME_LIMIT,
     STOP_TOKEN_LIMIT,
     STOP_SPEND_LIMIT,
+    STOP_REPETITION,
+    STOP_CONTEXT_LIMIT,
 )
 
 # The error code a tool call gets when the budget died before its turn. It is
@@ -177,6 +205,21 @@ class Budget:
     max_spend: float | None = None
     token_reserve: int = DEFAULT_TOKEN_RESERVE
     pricing: Pricing | None = None
+    # Session 9. The repetition rule lives HERE, on the budget, and that is
+    # an answer to a question the session doc left open: is repetition a rule
+    # you set or an invariant of a correct run? It is a rule. `describe()`
+    # prints every rule a run is under, Session 11 records that line with the
+    # result, and Session 12 changes one of them per arm - none of which can
+    # be done with an invariant hard-coded in the loop.
+    #
+    # Two thresholds, because a repeated failure and a repeated success are
+    # different events (D78). None on either disables that half: the control
+    # arm still COUNTS, it just never stops.
+    max_repeated_failures: int | None = DEFAULT_MAX_REPEATED_FAILURES
+    max_repeated_calls: int | None = DEFAULT_MAX_REPEATED_CALLS
+    # D86. None means "do not check", which is the honest setting for a
+    # provider whose window you do not know.
+    context_window: int | None = DEFAULT_CONTEXT_WINDOW
 
     @classmethod
     def from_env(cls, *, pricing: Pricing | None = None) -> Budget:
@@ -189,6 +232,11 @@ class Budget:
             max_spend=_env_float("MAX_SPEND"),
             token_reserve=_env_int("TOKEN_RESERVE") or DEFAULT_TOKEN_RESERVE,
             pricing=pricing if pricing is not None else Pricing.from_env(),
+            max_repeated_failures=_env_int("MAX_REPEATED_FAILURES")
+            or DEFAULT_MAX_REPEATED_FAILURES,
+            max_repeated_calls=_env_int("MAX_REPEATED_CALLS")
+            or DEFAULT_MAX_REPEATED_CALLS,
+            context_window=_env_int("CONTEXT_WINDOW") or DEFAULT_CONTEXT_WINDOW,
         )
 
     @property
@@ -212,6 +260,18 @@ class Budget:
             parts.append(f"tokens<={self.max_total_tokens}(+{self.token_reserve} held)")
         if self.max_spend is not None:
             parts.append(f"spend<=${self.max_spend:.4f}")
+        # Session 9. A repetition rule nobody can see is a run that stopped
+        # for no visible reason; the same argument that put the retry policy
+        # in the banner. "off" is printed rather than omitted, because the
+        # control arm of Session 12's comparison has to be legible in a trace
+        # as a DECISION rather than as a missing word.
+        repeats = "/".join(
+            "off" if limit is None else str(limit)
+            for limit in (self.max_repeated_failures, self.max_repeated_calls)
+        )
+        parts.append(f"repeat<={repeats}")
+        if self.context_window is not None:
+            parts.append(f"ctx<={self.context_window}")
         if self.pricing is None:
             parts.append("unpriced")
         return " ".join(parts)
@@ -301,7 +361,9 @@ class Ledger:
         }
 
 
-def check_before_step(budget: Budget, ledger: Ledger) -> str | None:
+def check_before_step(
+    budget: Budget, ledger: Ledger, *, history_tokens: int | None = None
+) -> str | None:
     """May the loop make another model call? Returns a stop reason, or None.
 
     D35. This runs BEFORE the POST, because usage arrives with the response:
@@ -316,11 +378,18 @@ def check_before_step(budget: Budget, ledger: Ledger) -> str | None:
     Check order is fixed and deliberate, because when two limits blow at once
     the one reported is the one Session 12's report will blame:
 
-        steps -> tool calls -> time -> tokens -> spend
+        steps -> tool calls -> context -> time -> tokens -> spend
 
     Deterministic limits first. `step_limit` reproduces on a re-run of the
     same trace; `time_limit` depends on how busy the machine was. Reporting
     the reproducible cause keeps an eval report comparable between runs.
+    `context` is deterministic - it is a function of the history and nothing
+    else - which is why it goes above the clock rather than below it.
+
+    `history_tokens` is Session 9's D86: an ESTIMATE of what the next request
+    will carry, from agent/context.py, supplied by the caller because this
+    module does not know what a message looks like. None means the caller did
+    not measure, and an unmeasured context is never a reason to stop.
     """
     if ledger.steps >= budget.max_steps:
         return STOP_STEP_LIMIT
@@ -330,6 +399,19 @@ def check_before_step(budget: Budget, ledger: Ledger) -> str | None:
         # run with no tool budget left can still only produce more tool calls.
         # Paying for that discovery is pointless.
         return STOP_TOOL_LIMIT
+
+    # D86. The same shape as the token reserve one rule below, against the
+    # context window rather than the wallet: refuse to START a step whose
+    # request would not fit, instead of discovering it as a provider 400 -
+    # or, on Ollama, as a silently truncated history that drops the assistant
+    # turn whose tool_call ids are still being answered. The reserve is the
+    # same number for the same reason: the response has to fit too.
+    if (
+        budget.context_window is not None
+        and history_tokens is not None
+        and history_tokens + budget.token_reserve > budget.context_window
+    ):
+        return STOP_CONTEXT_LIMIT
 
     if budget.max_seconds is not None and ledger.elapsed_s >= budget.max_seconds:
         return STOP_TIME_LIMIT
@@ -383,5 +465,20 @@ def refusal_message(stop_reason: str, budget: Budget) -> str:
         return (
             f"Not run: this run passed its time limit ({budget.max_seconds:g}s). "
             "No file was read or changed by this call."
+        )
+    if stop_reason == STOP_REPETITION:
+        # The one refusal in this file that names a mistake rather than a
+        # resource. It is still written to be read: on a --resume this is
+        # what the model wakes up to, and "you repeated yourself" with no
+        # instruction attached is an observation it cannot act on.
+        return (
+            "Not run: this run stopped because the same call was made too many "
+            "times without making progress. No file was read or changed by this "
+            "call."
+        )
+    if stop_reason == STOP_CONTEXT_LIMIT:
+        return (
+            "Not run: this conversation no longer fits in the model's context "
+            "window. No file was read or changed by this call."
         )
     return "Not run: this run is out of budget. No file was read or changed by this call."

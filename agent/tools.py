@@ -978,6 +978,19 @@ TOOLS = {
     "replace_text": replace_text,
 }
 
+# Session 8, D73. Which of those tools can change the workspace.
+#
+# Not a flag ON the tool and not a new tool behaviour - docs/session-08.md D
+# rules both out. It is a fact ABOUT the catalogue, and the one caller is the
+# journal: a run that dies between `tool_intent` and `tool_outcome` has to
+# know whether the call it never answered could have written something.
+#
+# _check_registries() refuses a writing tool that does not take 'path',
+# because agent/replay.py identifies the file at risk by that argument and a
+# writer named any other way would be fingerprinted as `no-path` - which
+# reads as "nothing to protect" and is exactly the silent wrong answer.
+WRITES = frozenset({"replace_text"})
+
 
 # --------------------------------------------------------------------------
 # D41. The schemas are the single source of truth for arguments.
@@ -1096,6 +1109,10 @@ def _check_registries() -> None:
     """
     import inspect
 
+    unknown_writers = WRITES - set(TOOLS)
+    if unknown_writers:
+        raise RuntimeError(f"WRITES names tools that do not exist: {sorted(unknown_writers)}")
+
     missing_schema = set(TOOLS) - set(_ARG_SPECS)
     missing_impl = set(_ARG_SPECS) - set(TOOLS)
     if missing_schema or missing_impl:
@@ -1117,6 +1134,15 @@ def _check_registries() -> None:
             raise RuntimeError(
                 f"{name}: schema says {sorted(_ARG_SPECS[name].properties)}, "
                 f"the function takes {sorted(declared)}"
+            )
+
+        # D73. A writing tool whose target is not called 'path' would be
+        # recorded with no fingerprint and replayed blind after a crash.
+        if name in WRITES and "path" not in _ARG_SPECS[name].properties:
+            raise RuntimeError(
+                f"{name} writes but takes no 'path' argument, so a crashed "
+                "run cannot tell which file it was about to change "
+                "(agent/replay.py)"
             )
 
 

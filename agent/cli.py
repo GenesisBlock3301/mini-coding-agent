@@ -40,6 +40,8 @@ from dotenv import load_dotenv
 
 from agent.budget import (
     DEFAULT_MAX_STEPS,
+    STOP_CONTEXT_LIMIT,
+    STOP_REPETITION,
     STOP_SPEND_LIMIT,
     STOP_STEP_LIMIT,
     STOP_TIME_LIMIT,
@@ -48,6 +50,7 @@ from agent.budget import (
     Budget,
     Pricing,
 )
+from agent.context import ContextSize
 from agent.journal import (
     Journal,
     JournalCorrupt,
@@ -58,6 +61,8 @@ from agent.journal import (
 from agent.loop import LoopResult, run_loop
 from agent.model import ModelConfig, ModelError, ModelResponse, active_provider, context_warning
 from agent.policy import workspace_root
+from agent.replay import plans_for
+from agent.retry import REASON_TEXT, RetryPolicy
 from agent.tools import TOOL_SCHEMAS, ToolResult
 
 SYSTEM_PROMPT = "You are a terse assistant."
@@ -139,12 +144,18 @@ RESUME_FLAG = "--resume="
 # fixture. policy.workspace_root() has accepted an override since Session 2
 # precisely so this day would be a flag and not a refactor.
 WORKSPACE_FLAG = "--workspace="
+# Session 9. The off switch, not a threshold knob: the thresholds belong in
+# .env with every other limit (MAX_REPEATED_FAILURES, MAX_REPEATED_CALLS),
+# and what a command line needs is the ability to run the SAME task with the
+# rule and without it. That is Session 12's control arm, and a comparison you
+# cannot run from one shell line is a comparison that does not get run.
+NO_REPEAT_STOP_FLAG = "--no-repeat-stop"
 USAGE = (
     f'usage: python -m agent.cli "your task" '
     f"[{TOOLS_FLAG}] [{RAW_FLAG}] [{MAX_STEPS_FLAG}N]\n"
     f"       [{MAX_TOOL_CALLS_FLAG}N] [{MAX_SECONDS_FLAG}S] "
     f"[{MAX_TOKENS_FLAG}N] [{MAX_SPEND_FLAG}USD]\n"
-    f"       [{WORKSPACE_FLAG}DIR]\n"
+    f"       [{WORKSPACE_FLAG}DIR] [{NO_REPEAT_STOP_FLAG}]\n"
     f"       python -m agent.cli {RESUME_FLAG}<run_id>      # continue a dead run\n"
     f"\nLimits default from .env (MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS,\n"
     f"MAX_TOTAL_TOKENS, MAX_SPEND, TOKEN_RESERVE); flags override them.\n"
@@ -152,7 +163,9 @@ USAGE = (
     f"limit cannot be enforced, so it is refused rather than ignored.\n"
     f"{WORKSPACE_FLAG}DIR overrides the workspace for one run (default:\n"
     f"./playground, or WORKSPACE_DIR from .env). Build a disposable one with\n"
-    f"scripts/fixture.py build <case>."
+    f"scripts/fixture.py build <case>.\n"
+    f"{NO_REPEAT_STOP_FLAG} counts identical calls but never stops for them\n"
+    f"(MAX_REPEATED_FAILURES / MAX_REPEATED_CALLS / CONTEXT_WINDOW set the rules)."
 )
 
 # Exit codes let a caller classify a failure without parsing text.
@@ -179,6 +192,11 @@ LIMIT_EXIT_CODES = {
     STOP_TIME_LIMIT: 13,
     STOP_TOKEN_LIMIT: 14,
     STOP_SPEND_LIMIT: 15,
+    # Session 9, D88. Codes of their own, for the reason D40 gave: Session
+    # 11's runner has to tell "went in circles" from "ran out of steps"
+    # without parsing English, and those two are the pair it will see most.
+    STOP_REPETITION: 16,
+    STOP_CONTEXT_LIMIT: 17,
 }
 
 
@@ -200,8 +218,12 @@ class Options:
     # A path as the user typed it. Resolving is policy.workspace_root()'s
     # job, not argv parsing's - one place decides what a path means.
     workspace: str | None = None
+    # Session 9. Counting continues; only the stopping is switched off.
+    repeat_stop: bool = True
 
-    def budget(self, pricing: Pricing | None) -> Budget:
+    def budget(
+        self, pricing: Pricing | None, *, context_window: int | None = None
+    ) -> Budget:
         """Flags over .env over defaults. Built here so nothing downstream
         reads argv, and so the whole rule set is one printable value."""
         base = Budget.from_env(pricing=pricing)
@@ -223,6 +245,22 @@ class Options:
             ),
             max_spend=(
                 self.max_spend if self.max_spend is not None else base.max_spend
+            ),
+            # None on both halves is what "count but never stop" means to
+            # Tally - the Session 8 behaviour, kept reachable on purpose.
+            max_repeated_failures=(
+                base.max_repeated_failures if self.repeat_stop else None
+            ),
+            max_repeated_calls=(
+                base.max_repeated_calls if self.repeat_stop else None
+            ),
+            # The provider's own figure, unless .env named one. An env
+            # setting is a statement about THIS deployment and outranks a
+            # table compiled when the adapter was written.
+            context_window=(
+                base.context_window
+                if os.getenv("CONTEXT_WINDOW")
+                else (context_window or base.context_window)
             ),
         )
 
@@ -345,6 +383,7 @@ def parse_argv(argv: list[str]) -> Options | None:
         max_spend=numbers.get(MAX_SPEND_FLAG),
         resume_run_id=resume_run_id,
         workspace=workspace,
+        repeat_stop=NO_REPEAT_STOP_FLAG not in flags,
     )
 
 
@@ -367,6 +406,17 @@ def report_model_error(err: ModelError) -> int:
         f"  retryable={err.retryable} safe_to_retry={err.safe_to_retry}",
         file=sys.stderr,
     )
+    # D76: the exit code stays the failure's own kind. "Gave up after three
+    # attempts" is the same outcome as "failed once" to a shell wrapper, and
+    # a new code would make every caller learn a word for a detail they
+    # already have in the text.
+    attempts = getattr(err, "attempts", 1)
+    if attempts > 1:
+        why = REASON_TEXT.get(getattr(err, "gave_up_because", ""), "")
+        print(
+            f"  sent {attempts} times" + (f"; stopped because {why}" if why else ""),
+            file=sys.stderr,
+        )
     return EXIT_CODES.get(err.kind, EXIT_UNKNOWN)
 
 
@@ -411,6 +461,19 @@ def print_response(step: int, response: ModelResponse) -> None:
     _failpoint("CRASH_AFTER_STEP", step)
 
 
+def print_context(step: int, size: ContextSize) -> None:
+    """One line per step, before the request, when it is worth reading.
+
+    Quiet below half the window on purpose. A number printed every step from
+    the first is a number nobody reads by the fifth, and this one only means
+    anything as it climbs. `est/actual` is the error bar (D85): the estimate
+    is characters/4 and the exact figure arrives one step late, so the ratio
+    is how wrong the limit currently is.
+    """
+    if size.loud:
+        print(f"  {size.line()}", file=sys.stderr)
+
+
 def print_tool(step: int, call: dict, result: ToolResult) -> None:
     """One block per tool call. Goes to stderr: this is the model's scratch
     work, not the answer, and must never be mistaken for it on stdout."""
@@ -431,7 +494,7 @@ def print_tool(step: int, call: dict, result: ToolResult) -> None:
     _failpoint("CRASH_AFTER_TOOL", step)
 
 
-def report_resume(state: ResumeState) -> None:
+def report_resume(state: ResumeState, root: Path) -> None:
     """What the journal says the dead process got through."""
     print(f"  replayed {state.steps_done} model call(s) and "
           f"{state.replayed_tools} tool result(s) from disk - cost: nothing",
@@ -443,11 +506,15 @@ def report_resume(state: ResumeState) -> None:
         names = ", ".join(
             (c.get("function") or {}).get("name", "?") for c in state.unanswered_calls
         )
-        print(f"  unanswered tool call(s) to redo: {names}", file=sys.stderr)
-    if state.in_flight_call_ids:
-        print(f"  WARNING: {len(state.in_flight_call_ids)} tool(s) were entered but "
-              "never recorded an outcome. Safe to redo only because list_files and "
-              "read_file do not mutate anything.", file=sys.stderr)
+        print(f"  unanswered tool call(s): {names}", file=sys.stderr)
+    # Session 8, D72. Until this session the line here said redoing was safe
+    # "because list_files and read_file do not mutate anything" - true when it
+    # was written and false since Session 6. Now each interrupted call is
+    # decided against the workspace and named individually, because "N tools
+    # were entered" is not something a user can act on and "this edit already
+    # applied, I am not repeating it" is.
+    for plan in plans_for(state, root=root).values():
+        print(f"  in flight: {plan.line()}", file=sys.stderr)
     if state.model_call_was_in_flight:
         print("  WARNING: a model call was in flight when the process died. It may "
               "have been billed; the response is unrecoverable. Re-calling.",
@@ -483,6 +550,38 @@ def report_totals(result: LoopResult) -> None:
         print(
             f"  WARNING: {len(result.malformed_call_ids)} tool call(s) arrived with "
             "a missing or duplicated id. They were answered in order anyway.",
+            file=sys.stderr,
+        )
+
+    # Session 8, D74/D75. The results were always correct; what was missing
+    # was the bill. A model that keeps calling a tool that does not exist pays
+    # one tool call each time and gets a correct answer each time, and without
+    # this line the run just looks slow.
+    if result.tool_errors:
+        counts: dict[str, int] = {}
+        for code in result.tool_errors:
+            counts[code] = counts.get(code, 0) + 1
+        print(
+            "  tool errors: "
+            + ", ".join(f"{code} x{n}" for code, n in counts.items()),
+            file=sys.stderr,
+        )
+    # Session 9. Session 8 printed this as a warning that nothing acted on.
+    # It is now the measurement behind a rule, so it reports both outcomes -
+    # a repeated success is the case D78 is about and was invisible here -
+    # and it says whether the rule is even armed. A count with no rule and a
+    # count under a rule look identical on screen otherwise, which is exactly
+    # the confusion Session 12's control arm would inherit.
+    if result.repeated_failures or result.repeated_calls:
+        armed = (
+            result.budget.max_repeated_failures is not None
+            or result.budget.max_repeated_calls is not None
+        )
+        print(
+            f"  repeats: {result.repeated_failures} failing, "
+            f"{result.repeated_calls} succeeding, longest run "
+            f"{result.longest_repeat}"
+            + ("" if armed else " (rule off: nothing stops for this)"),
             file=sys.stderr,
         )
 
@@ -530,6 +629,26 @@ def explain_limit(result: LoopResult) -> str:
             f"another call needs {budget.token_reserve} in reserve, so it was "
             "never made"
         )
+    if reason == STOP_REPETITION:
+        limit = (
+            budget.max_repeated_calls
+            if result.repetition_stopped_on and result.longest_repeat
+            else budget.max_repeated_failures
+        )
+        return (
+            f"the same call was made {result.longest_repeat} times without "
+            f"making progress: {result.repetition_stopped_on}"
+            + (f" (limit {limit})" if limit else "")
+        )
+    if reason == STOP_CONTEXT_LIMIT:
+        size = result.context
+        estimated = size.estimated_tokens if size else 0
+        return (
+            f"the conversation is ~{estimated} tokens and would not fit the "
+            f"{budget.context_window}-token context window with "
+            f"{budget.token_reserve} held for the reply; the next call was "
+            "never made"
+        )
     if reason == STOP_SPEND_LIMIT:
         spent = result.cost_usd or 0.0
         return (
@@ -544,7 +663,7 @@ def report_raw(response: ModelResponse) -> None:
     print(json.dumps(response.raw, indent=2), file=sys.stderr)
 
 
-def _open_resumed_run(run_id: str) -> tuple[Journal, ResumeState] | int:
+def _open_resumed_run(run_id: str, root: Path) -> tuple[Journal, ResumeState] | int:
     """Reopen a dead run's journal and replay it, or return an exit code.
 
     Split out of main so the two failure modes a resume has - no journal, and
@@ -574,17 +693,20 @@ def _open_resumed_run(run_id: str) -> tuple[Journal, ResumeState] | int:
         print(f"error [journal_corrupt]: {err}", file=sys.stderr)
         return EXIT_USAGE
 
-    report_resume(resume)
+    report_resume(resume, root)
     return journal, resume
 
 
-def _start_new_run(options, budget: Budget, provider) -> tuple[Journal, list[dict]]:
+def _start_new_run(
+    options, budget: Budget, provider, retry: RetryPolicy
+) -> tuple[Journal, list[dict]]:
     """A fresh journal and the opening two messages."""
     run_id = new_run_id()
     journal = Journal.create(RUNS_DIR, run_id)
     # Printed FIRST: after a crash this line is the only way back in.
     print(f"run {run_id}  (resume with --resume={run_id})", file=sys.stderr)
     print(f"budget: {budget.describe()}", file=sys.stderr)
+    print(f"retry:  {retry.describe()}", file=sys.stderr)
     _warn_about_context(provider)
     return journal, [
         {"role": "system", "content": options.system_prompt},
@@ -622,7 +744,7 @@ def main(argv: list[str]) -> int:
         return report_model_error(err)
     pricing = Pricing.free() if provider.free else Pricing.from_env()
 
-    budget = options.budget(pricing)
+    budget = options.budget(pricing, context_window=provider.context_window)
     # D38. A spend limit with no price list is not "unlimited" - it is a
     # number on screen that nothing enforces, which is worse than no number.
     if budget.needs_pricing:
@@ -634,16 +756,20 @@ def main(argv: list[str]) -> int:
         )
         return EXIT_USAGE
 
+    # Read from .env like every other rule set, and printed with them. A
+    # retry policy nobody can see is latency with no explanation.
+    retry = RetryPolicy.from_env()
+
     messages: list[dict] = []
     resume: ResumeState | None = None
 
     if options.resume_run_id:
-        opened = _open_resumed_run(options.resume_run_id)
+        opened = _open_resumed_run(options.resume_run_id, root)
         if isinstance(opened, int):
             return opened
         journal, resume = opened
     else:
-        journal, messages = _start_new_run(options, budget, provider)
+        journal, messages = _start_new_run(options, budget, provider, retry)
 
     try:
         result = run_loop(
@@ -653,8 +779,10 @@ def main(argv: list[str]) -> int:
             budget=budget,
             on_response=print_response,
             on_tool=print_tool,
+            on_context=print_context,
             journal=journal,
             resume=resume,
+            retry=retry,
         )
     except ModelError as err:
         return report_model_error(err)

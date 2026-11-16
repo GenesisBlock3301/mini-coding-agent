@@ -1,3 +1,4 @@
 httpx==0.28.1
-python-dotenv==1.2.4
+prompt_toolkit==3.0.52
 pytest==9.2.0
+python-dotenv==1.2.4

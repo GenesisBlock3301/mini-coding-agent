@@ -67,7 +67,9 @@ from agent.journal import Journal, JournalCorrupt, new_run_id, rebuild
 from agent.loop import LoopResult, run_loop, tool_message
 from agent.model import ModelConfig, ModelError, active_provider, call_model, context_warning
 from agent.policy import workspace_root
+from agent.retry import RetryPolicy
 from agent.tools import TOOL_SCHEMAS, ToolResult
+from agent.tracing import load as load_journal, segments, timeline
 
 try:  # Arrow-key history for input(), for one import. Absent on some platforms.
     import readline  # noqa: F401
@@ -90,13 +92,11 @@ USAGE = (
     "(needs PRICE_*), MAX_CONTEXT_TOKENS. Per-turn limits are the usual\n"
     "MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS."
 )
-HELP = (
-    ":quit      end the session\n"
-    ":cost      tokens and spend so far\n"
-    ":reset     forget the conversation, keep the budget already spent\n"
-    ":history   how many messages the model is being sent\n"
-    ":help      this"
-)
+# D61 said commands are matched before anything reaches the model; it did not
+# say what marks one. `:` still does. `/` is added because it is what a person
+# who has used Claude Code or Codex reaches for, and because it is the key
+# that opens the menu - see `_looks_like_command` for the ambiguity it costs.
+COMMAND_PREFIXES = ("/", ":")
 
 
 def _env_int(name: str) -> int | None:
@@ -125,6 +125,23 @@ class Session:
     max_session_tokens: int | None = None
     max_session_spend: float | None = None
     max_context_tokens: int | None = None
+    # Only for display, and only so `:status` can stand alone.
+    model_label: str = ""
+    # Session 8's retry policy, which this REPL did not have until now: it
+    # called run_loop without `retry=` and therefore ran at RetryPolicy.off(),
+    # one attempt per request. The one-shot CLI has read MAX_ATTEMPTS from
+    # .env since Session 8, so the same 500 was retried there and fatal here -
+    # a difference nobody chose, in the entry point where it hurts most,
+    # because a REPL turn that dies to one blip loses the user's place in a
+    # conversation rather than one command.
+    #
+    # D69 still holds across the whole turn: `writes_done` is the loop's own
+    # record of whether a tool in THIS turn has edited anything, and a request
+    # that may already have arrived is not resent once one has.
+    #
+    # The default stays `off` so that constructing a Session in a test gets
+    # the old behaviour; main() passes RetryPolicy.from_env().
+    retry: RetryPolicy = field(default_factory=RetryPolicy.off)
     history: list[dict[str, Any]] = field(default_factory=list)
 
     turns: int = 0
@@ -278,13 +295,17 @@ def answer_unfinished_calls(messages: list[dict[str, Any]]) -> int:
 
 
 def start_session(
-    turn_limits: Budget, root: Path, resume_id: str | None
+    turn_limits: Budget,
+    root: Path,
+    resume_id: str | None,
+    retry: RetryPolicy | None = None,
 ) -> Session | None:
     """A fresh session, or one restored from a journal. None on a bad resume."""
     max_context = _env_int("MAX_CONTEXT_TOKENS") or DEFAULT_MAX_CONTEXT_TOKENS
     common = {
         "root": root,
         "turn_limits": turn_limits,
+        "retry": retry or RetryPolicy.off(),
         "max_session_tokens": _env_int("MAX_SESSION_TOKENS"),
         "max_session_spend": _env_float("MAX_SESSION_SPEND"),
         "max_context_tokens": max_context,
@@ -338,11 +359,224 @@ def start_session(
     session.cache_hit_tokens = state.cache_hit_tokens
     session.cache_miss_tokens = state.cache_miss_tokens
     session.tool_calls = state.tool_calls_done
-    session.turns = state.steps_done
+    # D107: turns are RUNS in this journal, not steps. `state.steps_done`
+    # counts model_result events, which is the right number for run_loop's
+    # own resume - one run, one step counter - and the wrong one here, where
+    # D56 puts many runs in one file. A three-step answer to one question
+    # came back as `turns=3`, and `/status` now prints that beside a journal
+    # line saying "1 turn(s) recorded", so the file disagreed with itself.
+    session.turns = len(segments(load_journal(journal.path)))
 
     print(f"  restored {len(messages)} messages", file=sys.stderr)
     print(f"  {session.describe()}", file=sys.stderr)
     return session
+
+
+# --------------------------------------------------------------------------
+# Commands. One table, three consumers (D101): the dispatcher below, `:help`,
+# and the completion menu. The previous shape kept a hand-written HELP string
+# beside an if/elif chain, which is two places to edit and one to forget - and
+# a command that works but is undocumented is a command nobody runs.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Command:
+    """`handler` returns False to end the session, as `run_command` always has."""
+
+    name: str
+    summary: str
+    handler: Callable[[Session], bool] | Callable[[Session, str], bool]
+    aliases: tuple[str, ...] = ()
+    takes_argument: bool = False
+
+
+def _context_line(session: Session) -> str:
+    """D59's measurement, said in a way that distinguishes 0 from unknown."""
+    measured = session.context_tokens
+    ceiling = session.max_context_tokens
+    if not measured:
+        return f"not yet measured (ceiling {ceiling or 'none'})"
+    if not ceiling:
+        return f"{measured} tokens (no ceiling)"
+    return f"{measured}/{ceiling} tokens ({measured / ceiling:.0%})"
+
+
+def _cmd_status(session: Session) -> bool:
+    """Where am I - as opposed to `:cost`, which is what has this cost.
+
+    D102: the two are kept apart because they answer different questions at
+    different moments. `:cost` is a number you check against a budget.
+    `:status` is what you run when the banner has scrolled off the top and you
+    need the session id to `--resume`, the journal path `:trace` reads, or an
+    answer to "why was my last turn refused". `refusal()` is called here
+    rather than re-derived, so this line cannot disagree with the gate.
+    """
+    trace = load_journal(session.journal.path)
+    recorded = len(segments(trace)) if trace.events else 0
+    spent = session.spend
+    rows = [
+        f"session    {session.session_id}  (resume with --resume={session.session_id})",
+        f"model      {session.model_label or 'unknown'}",
+        f"workspace  {session.root}",
+        f"journal    {session.journal.path}",
+        f"           {len(trace.events)} events, {recorded} turn(s) recorded"
+        + (f", {trace.damaged} damaged line(s)" if trace.damaged else ""),
+        f"turns      {session.turns}  tools={session.tool_calls}",
+        f"tokens     {session.total_tokens} (in={session.prompt_tokens} "
+        f"hit={session.cache_hit_tokens} out={session.completion_tokens})"
+        + (f"  of {session.max_session_tokens}" if session.max_session_tokens else ""),
+        f"spend      {'unpriced' if spent is None else f'${spent:.4f}'}"
+        + (
+            f"  of ${session.max_session_spend:.4f}"
+            if session.max_session_spend is not None
+            else ""
+        ),
+        f"context    {_context_line(session)}",
+        f"per turn   {session.turn_limits.describe()}",
+        f"retry      {session.retry.describe()}",
+        f"next turn  {session.refusal() or 'ok'}",
+    ]
+    print("\n".join(rows), file=sys.stderr)
+    return True
+
+
+TRACE_USAGE = "usage: /trace [all|<n>] [full]"
+
+
+def _cmd_trace(session: Session, argument: str = "") -> bool:
+    """The journal, read back, without leaving the session.
+
+    D103: this is `tracing.py` pointed at the file this very session is still
+    appending to, and that is safe for one reason - every append is flushed
+    and fsynced BEFORE the side effect it authorises, so what is on disk
+    mid-session is a complete account of everything that has already happened.
+    The reader writes nothing (D89), so running it against a live journal
+    cannot damage the session it is describing.
+
+    The default is the LAST turn rather than the session, because a trace you
+    have to scroll is a trace you stop reading. `all` and `<n>` exist for when
+    you are actually hunting something.
+
+    `full` is the D92 opt-in: it prints tool results verbatim, which means the
+    contents of every file this session has read.
+    """
+    words = argument.split()
+    full = any(word in ("full", "--full") for word in words)
+    rest = [word for word in words if word not in ("full", "--full")]
+
+    trace = load_journal(session.journal.path)
+    if not trace.events:
+        print(
+            f"nothing recorded yet: {session.journal.path} is empty. The first "
+            "record is written before the first request leaves.",
+            file=sys.stderr,
+        )
+        return True
+
+    turns = segments(trace)
+    if not rest:
+        chosen = turns[-1:]
+    elif rest[0] in ("all", "*"):
+        chosen = turns
+    elif rest[0].isdigit() and int(rest[0]) > 0:
+        chosen = turns[-int(rest[0]) :]
+    else:
+        print(f"{TRACE_USAGE}  (did not understand {rest[0]!r})", file=sys.stderr)
+        return True
+
+    first = len(turns) - len(chosen) + 1
+    print(
+        f"# {session.session_id}  turn {first}-{len(turns)} of {len(turns)}, "
+        f"tool output {'VERBATIM - do not paste this anywhere' if full else 'bounded'}",
+        file=sys.stderr,
+    )
+    for turn in chosen:
+        print("\n".join(timeline(turn, full=full)), file=sys.stderr)
+    return True
+
+
+def _cmd_cost(session: Session) -> bool:
+    print(session.describe(), file=sys.stderr)
+    return True
+
+
+def _cmd_history(session: Session) -> bool:
+    print(
+        f"{len(session.history)} messages; last prompt was "
+        f"{session.context_tokens or 'not yet measured'} tokens",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _cmd_reset(session: Session) -> bool:
+    session.history = [{"role": "system", "content": TOOLS_SYSTEM_PROMPT}]
+    session.context_tokens = 0
+    # Totals are NOT cleared: money already spent is still spent, and a
+    # command that silently refills a budget is a budget with a loophole.
+    print(
+        "conversation cleared. Budget already spent is unchanged: "
+        f"{session.describe()}",
+        file=sys.stderr,
+    )
+    return True
+
+
+def _cmd_help(session: Session) -> bool:
+    print(help_text(), file=sys.stderr)
+    return True
+
+
+def _cmd_quit(session: Session) -> bool:
+    return False
+
+
+COMMANDS: tuple[Command, ...] = (
+    Command("status", "current session metrics", _cmd_status),
+    Command("trace", "execution timeline   [all|<n>] [full]", _cmd_trace, takes_argument=True),
+    Command("cost", "token usage and estimated cost", _cmd_cost),
+    Command("history", "how many messages the model is being sent", _cmd_history),
+    Command("reset", "forget the conversation, keep the budget spent", _cmd_reset),
+    Command("help", "this", _cmd_help),
+    Command("quit", "end the session", _cmd_quit, aliases=("q", "exit")),
+)
+
+BY_NAME: dict[str, Command] = {
+    alias: command for command in COMMANDS for alias in (command.name, *command.aliases)
+}
+
+
+def help_text() -> str:
+    width = max(len(command.name) for command in COMMANDS)
+    rows = [f"  /{command.name:<{width}}  {command.summary}" for command in COMMANDS]
+    return "\n".join(["commands (/ or : both work):", *rows])
+
+
+def _looks_like_command(task: str) -> bool:
+    """`/status` is a command. `/Users/sifat/notes.md` is a question.
+
+    D104: `:` stays unambiguous - anything starting with it is a command, and
+    an unknown one is reported rather than sent, which is the behaviour the
+    tests have always asserted. `/` cannot be treated that way, because a
+    POSIX path starts with one. Answering "unknown command" to someone who
+    asked about a file would read as a REFUSAL, which is the worst available
+    failure, so the `/` rule is about shape rather than membership: one word,
+    letters and dashes only. A path fails it at the second slash and goes to
+    the model as the question it is.
+    """
+    if not task or task[0] not in COMMAND_PREFIXES:
+        return False
+    word = task[1:].split(" ", 1)[0]
+    if not word:
+        # D106: a bare `/` is "what can I type here". In a terminal the menu
+        # answers it before Enter is ever pressed, but the menu is the layer
+        # that can be absent (D105), and sending `/` to the model is a billed
+        # request whose answer is nothing. The prefix alone prints the list.
+        return True
+    if task[0] == ":":
+        return True
+    return all(char.isalpha() or char == "-" for char in word)
 
 
 def run_command(command: str, session: Session) -> bool:
@@ -351,32 +585,27 @@ def run_command(command: str, session: Session) -> bool:
     Matched before anything is appended to the history, so a command can never
     reach the model (D61).
     """
-    if command in (":quit", ":q", ":exit"):
-        return False
+    head, _, argument = command.partition(" ")
+    name = head[1:].lower()
+    if not name:
+        print(help_text(), file=sys.stderr)
+        return True
 
-    if command == ":cost":
-        print(session.describe(), file=sys.stderr)
-    elif command == ":history":
+    entry = BY_NAME.get(name)
+    if entry is None:
+        print(f"unknown command {head}.", file=sys.stderr)
+        print(help_text(), file=sys.stderr)
+        return True
+
+    argument = argument.strip()
+    if argument and not entry.takes_argument:
         print(
-            f"{len(session.history)} messages; last prompt was "
-            f"{session.context_tokens or 'not yet measured'} tokens",
+            f"{head} takes no arguments (ignoring {argument!r})",
             file=sys.stderr,
         )
-    elif command == ":reset":
-        session.history = [{"role": "system", "content": TOOLS_SYSTEM_PROMPT}]
-        session.context_tokens = 0
-        # Totals are NOT cleared: money already spent is still spent, and a
-        # command that silently refills a budget is a budget with a loophole.
-        print(
-            "conversation cleared. Budget already spent is unchanged: "
-            f"{session.describe()}",
-            file=sys.stderr,
-        )
-    elif command == ":help":
-        print(HELP, file=sys.stderr)
-    else:
-        print(f"unknown command {command}. :help for the list.", file=sys.stderr)
-    return True
+    if entry.takes_argument:
+        return entry.handler(session, argument)
+    return entry.handler(session)
 
 
 def take_turn(session: Session, task: str, model_fn: Callable) -> None:
@@ -396,6 +625,7 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
             on_response=print_response,
             on_tool=print_tool,
             journal=session.journal,
+            retry=session.retry,
         )
     except ModelError as err:
         report_model_error(err)
@@ -456,16 +686,23 @@ def _spend_limit_without_prices(turn_limits: Budget) -> bool:
     )
 
 
+def model_label(provider) -> str:
+    """`.env` wins over the provider default - the banner and `:status` must
+    not be able to disagree about which model is answering."""
+    model = os.getenv(provider.name.upper() + "_MODEL") or provider.model
+    return f"{provider.name} ({model})"
+
+
 def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
     """Everything printed once, before the first prompt."""
-    model = os.getenv(provider.name.upper() + "_MODEL") or provider.model
     print(
         f"session {session.session_id}  (resume with --resume={session.session_id})",
         file=sys.stderr,
     )
-    print(f"provider:   {provider.name} ({model})", file=sys.stderr)
+    print(f"provider:   {session.model_label}", file=sys.stderr)
     print(f"workspace:  {session.root}", file=sys.stderr)
     print(f"per turn:   {turn_limits.describe()}", file=sys.stderr)
+    print(f"retry:      {session.retry.describe()}", file=sys.stderr)
     print(
         f"per session: tokens<={session.max_session_tokens or 'unlimited'} "
         f"spend<={session.max_session_spend or 'unlimited'} "
@@ -495,7 +732,100 @@ def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
     if warning:
         print(f"warning: {warning}", file=sys.stderr)
 
-    print(":help for commands, :quit or Ctrl-D to end.", file=sys.stderr)
+    print(file=sys.stderr)
+    print(help_text(), file=sys.stderr)
+    print("type / for the menu. /quit or Ctrl-D to end.", file=sys.stderr)
+
+
+def _command_completer():
+    """Candidates for the live menu. Imports inside, so the module still
+    loads where prompt_toolkit is absent."""
+    from prompt_toolkit.completion import Completer, Completion
+
+    class CommandCompleter(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            # Only the first word, and only a prefixed one: once a space is
+            # typed the line is an argument (`/trace all`), and a question
+            # must never have a menu opened over it.
+            if not text or text[0] not in COMMAND_PREFIXES or " " in text:
+                return
+            prefix, typed = text[0], text[1:].lower()
+            for command in COMMANDS:
+                if command.name.startswith(typed):
+                    yield Completion(
+                        prefix + command.name,
+                        start_position=-len(text),
+                        display=prefix + command.name,
+                        display_meta=command.summary,
+                    )
+
+    return CommandCompleter()
+
+
+def prompt_widget(**overrides: Any):
+    """The configured prompt. `overrides` exists for the tests, which pass a
+    pipe and a dummy terminal - the point being that what they exercise is
+    this configuration and not a second one written beside it."""
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+
+    settings: dict[str, Any] = {
+        "completer": _command_completer(),
+        # The whole request: the menu appears as `/` is typed, and narrows
+        # with every further character. Tab or the arrow keys pick.
+        "complete_while_typing": True,
+        "history": InMemoryHistory(),
+        "reserve_space_for_menu": len(COMMANDS) + 1,
+    }
+    settings.update(overrides)
+    return PromptSession(**settings)
+
+
+def make_read_line() -> Callable[[str], str]:
+    """A prompt with a live command menu, or plain `input()` when that cannot work.
+
+    D105: gated on BOTH streams being a terminal, not just stdin.
+    prompt_toolkit draws its menu by moving the cursor around stdout, and
+    `python -m agent.chat > transcript` is a documented way to run this
+    module. Rendering a dropdown into that file would corrupt the one stream
+    this module promises is clean, so the fallback is the old `input()`, which
+    still has arrow-key history from the readline import above.
+
+    The history is in-memory on purpose: `input()` + readline never persisted
+    a history file either, and quietly starting to write the user's questions
+    to disk is not a change that belongs in a completion feature.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return input
+    try:
+        prompt_session = prompt_widget()
+    except Exception as err:  # pragma: no cover - terminal dependent
+        # Deliberately broad. prompt_toolkit may be absent, or present and
+        # unable to take this particular terminal. Either way the session
+        # must still start: a REPL that refuses to open because its
+        # autocomplete would not render is worse than one without a menu.
+        # Said out loud rather than swallowed, so it is not a silent downgrade.
+        print(
+            f"(no command menu: {type(err).__name__}: {err}. "
+            "Type / or /help for the list.)",
+            file=sys.stderr,
+        )
+        return input
+
+    def read_line(prompt: str) -> str:
+        # PROMPT leads with a blank line for spacing. prompt_toolkit would
+        # treat it as part of a multi-line prompt and redraw it on every
+        # keystroke, so it is written out here and kept out of the widget.
+        blanks = len(prompt) - len(prompt.lstrip("\n"))
+        if blanks:
+            sys.stderr.write("\n" * blanks)
+            sys.stderr.flush()
+        # Ctrl-C raises KeyboardInterrupt and Ctrl-D raises EOFError, exactly
+        # as input() does, so _read_task's D60 handling is unchanged.
+        return prompt_session.prompt(prompt.lstrip("\n"))
+
+    return read_line
 
 
 def _read_task(read_line: Callable[[str], str]) -> str | None:
@@ -524,7 +854,7 @@ def _repl(session: Session, model_fn: Callable, read_line: Callable[[str], str])
         if not task:
             continue
 
-        if task.startswith(":"):
+        if _looks_like_command(task):
             if not run_command(task, session):
                 return
             continue
@@ -541,10 +871,14 @@ def main(
     argv: list[str] | None = None,
     *,
     model_fn: Callable = call_model,
-    read_line: Callable[[str], str] = input,
+    read_line: Callable[[str], str] | None = None,
 ) -> int:
     """`model_fn` and `read_line` are injected so the whole session is
-    testable with no key and no network - the same seam run_loop offers."""
+    testable with no key and no network - the same seam run_loop offers.
+
+    `read_line=None` means "decide at runtime": a terminal gets the menu, a
+    pipe gets `input()`, and a test gets whatever it passed.
+    """
     load_dotenv()
 
     resume_id, ok = _parse_resume_flag(argv)
@@ -568,12 +902,17 @@ def main(
         )
         return 2
 
-    session = start_session(turn_limits, workspace_root(), resume_id)
+    # Read from .env with every other rule set, exactly as cli.py does. A
+    # retry policy the two entry points disagree about is two agents.
+    retry = RetryPolicy.from_env()
+
+    session = start_session(turn_limits, workspace_root(), resume_id, retry)
     if session is None:
         return 2
+    session.model_label = model_label(provider)
 
     _print_banner(session, provider, turn_limits)
-    _repl(session, model_fn, read_line)
+    _repl(session, model_fn, read_line if read_line is not None else make_read_line())
 
     print(f"[session {session.session_id}] {session.describe()}", file=sys.stderr)
     return 0

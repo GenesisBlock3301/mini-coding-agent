@@ -6,6 +6,7 @@
     python scripts/crash_demo.py --sigkill      # real SIGKILL of the real CLI
     python scripts/crash_demo.py --cost         # crash, restart, add up the bill
     python scripts/crash_demo.py --edit         # Session 6: crash around a WRITE
+    python scripts/crash_demo.py --replay       # Session 8: atomic != idempotent
 
     python scripts/crash_demo.py --at 1 "read src/utils.py"   # your own task
 
@@ -47,11 +48,12 @@ sys.path.insert(0, str(ROOT))
 from dotenv import load_dotenv
 
 from agent.cli import RUNS_DIR, TOOLS_SYSTEM_PROMPT
-from agent.journal import TOOL_INTENT, TOOL_OUTCOME, Journal, new_run_id
+from agent.journal import TOOL_INTENT, TOOL_OUTCOME, Journal, new_run_id, rebuild
 from agent.loop import run_loop
 from agent.model import ModelResponse
 from agent.policy import workspace_root
-from agent.tools import TOOL_SCHEMAS
+from agent.replay import plans_for
+from agent.tools import TOOL_SCHEMAS, dispatch
 
 # find_dotenv() searches upward from the CALLING FILE, which here is scripts/.
 # Point it at the project root or you get "No API key" from a correct setup.
@@ -196,6 +198,13 @@ def cost_run(task: str) -> None:
 #
 # Both leave a journal holding exactly one tool_intent and no tool_outcome.
 # The file is different. The journal is not.
+#
+# SESSION 8 (D73) changes the second sentence. The intent record now carries a
+# fingerprint of the file taken a moment before dispatch was entered, so the
+# journals are no longer identical: one of them describes a file that still
+# matches, and one describes a file that does not. Each run below therefore
+# ends by RESUMING, which is where the fingerprint is cashed - and the resume
+# is scripted for the same reason the crash is, so the whole demo stays free.
 # --------------------------------------------------------------------------
 
 EDIT_FIXTURE = "crash_target.py"
@@ -264,6 +273,55 @@ def edit_crash_child(when: str, run_id: str) -> None:
     )
 
 
+def _final_answer() -> ModelResponse:
+    """What the model says once the interrupted call has been answered."""
+    return ModelResponse(
+        text="the subtraction is fixed",
+        model="scripted",
+        finish_reason="stop",
+        prompt_tokens=0,
+        completion_tokens=0,
+        total_tokens=0,
+        duration_ms=0.0,
+        tool_calls=[],
+    )
+
+
+def resume_dead_run(run_id: str) -> str:
+    """Pick the journal back up and report what the resumed run decided.
+
+    This is the half that did not exist in Session 6. The crash is the same
+    crash; what is new is that the process which comes after it can say which
+    of the two worlds it woke up in.
+    """
+    journal = Journal.open(RUNS_DIR, run_id)
+    state = rebuild(journal.events())
+
+    print("\n  RESUME")
+    for plan in plans_for(state, root=workspace_root()).values():
+        print(f"    verdict           : {plan.line()}")
+        print(f"      recorded before : {plan.before}")
+        print(f"      on disk now     : {plan.now}")
+
+    result = run_loop(
+        [],
+        root=workspace_root(),
+        tools=TOOL_SCHEMAS,
+        model_fn=lambda messages, *, tools=None: _final_answer(),
+        journal=journal,
+        resume=state,
+        max_steps=5,
+    )
+    answer = [m for m in result.messages if m.get("role") == "tool"][-1]
+    print(f"    tool message      : {answer['content'][:96]}...")
+    print(f"    changed_paths     : {result.changed_paths}")
+    print(f"    file now          : {(workspace_root() / EDIT_FIXTURE).read_bytes()!r}")
+
+    landed = (workspace_root() / EDIT_FIXTURE).read_bytes() == EDIT_AFTER_BYTES
+    reported = result.changed_paths == [EDIT_FIXTURE]
+    return f"file fixed = {landed}, run reported it = {reported}"
+
+
 def _journal_summary(run_id: str) -> tuple[int, int, list[str]]:
     """(intents, outcomes, the tool names that were entered)."""
     events = Journal.open(RUNS_DIR, run_id).events()
@@ -307,10 +365,12 @@ def edit_crash(when: str) -> str:
     litter = list(workspace_root().glob(".agent-edit-*"))
     print(f"    temp files left   : {[p.name for p in litter] or 'none'}")
 
+    verdict = resume_dead_run(run_id)
+
     target.unlink(missing_ok=True)
     for stray in litter:
         stray.unlink(missing_ok=True)
-    return f"{intents} intent / {outcomes} outcome, edit landed = {landed}"
+    return f"crash left edit landed = {landed}; after resume: {verdict}"
 
 
 def edit_crash_both() -> None:
@@ -322,21 +382,79 @@ def edit_crash_both() -> None:
     print(f"  crash BEFORE the write: {before}")
     print(f"  crash AFTER  the write: {after}")
     print()
-    print("  The journals are IDENTICAL: one tool_intent, no tool_outcome.")
-    print("  The files are not. So 'did the file change?' CANNOT be answered")
-    print("  from the journal alone - which is docs/session-06.md self-test #2.")
+    print("  Both journals still hold one tool_intent and no tool_outcome.")
+    print("  What the intent now also holds is a fingerprint of the file taken")
+    print("  before dispatch was entered, so the resume can ask one question:")
+    print("  are these bytes the ones the call started from?")
     print()
-    print("  Two ways to fix it, and they are not the same fix:")
-    print("    - record a content hash with the intent, and the question")
-    print("      becomes answerable after the fact;")
-    print("    - keep the write atomic, and the question stops mattering,")
-    print("      because the file is never half-written either way.")
-    print("  replace_text does the second already: 'half-written' is False")
-    print("  above in BOTH runs. Nothing yet does the first.")
+    print("    unchanged -> the write never happened  -> run it again")
+    print("    changed   -> the write happened        -> do NOT run it again,")
+    print("                 and report the file as changed by this run")
     print()
-    print("  Until something does, --resume re-runs an unanswered call. That")
-    print("  is safe when the edit landed (old is gone -> no_match) and NOT")
-    print("  safe when new contains old: the edit applies a second time.")
+    print("  The four outcomes, and which ones this now produces:")
+    print("    edit landed and IS reported     <- crash AFTER,  resumed")
+    print("    edit did not land, IS retried   <- crash BEFORE, resumed")
+    print("    edit landed and is NOT reported <- what a naive replay gives you")
+    print("    edit did not land and is lost   <- what no journal at all gives")
+    print()
+    print("  The third one is the dangerous one: a replayed edit that already")
+    print("  landed comes back no_match, the model is told its edit failed,")
+    print("  and the file disagrees. `--replay` shows that refusal on its own.")
+
+
+# --------------------------------------------------------------------------
+# Session 8, step 8. Atomic and idempotent are different properties, and
+# Session 6 only bought the first one.
+# --------------------------------------------------------------------------
+
+
+def _edit(old: str, new: str):
+    return dispatch(
+        "replace_text",
+        json.dumps({"path": EDIT_FIXTURE, "old": old, "new": new}),
+        root=workspace_root(),
+    )
+
+
+def replay_demo() -> None:
+    """Apply an edit, then send the identical call again. No crash needed."""
+    banner("THE SAME EDIT, SENT TWICE")
+
+    target = workspace_root() / EDIT_FIXTURE
+    target.write_bytes(EDIT_BEFORE_BYTES)
+    print(f"  fixture: {EDIT_BEFORE_BYTES!r}\n")
+
+    first = _edit("return a + b", "return a - b")
+    print(f"  call 1: ok={first.ok} changed_path={first.changed_path}")
+    print(f"          {first.content}")
+
+    second = _edit("return a + b", "return a - b")
+    print(f"\n  call 2 (identical): ok={second.ok} error={second.error_code}")
+    print(f"          {second.content}")
+
+    wrong = _edit("return a * b", "return a - b")
+    print(f"\n  a wrong anchor the model invented: ok={wrong.ok} error={wrong.error_code}")
+    print(f"          {wrong.content}")
+
+    print(f"\n  file: {target.read_bytes()!r}  (edited once, as asked)")
+    print(f"  calls 2 and 3 are byte-identical results: {second.content == wrong.content}")
+    print()
+    print("  So: a zero-match refusal after a crash means EITHER the model was")
+    print("  wrong OR the edit already succeeded, and the tool cannot tell you")
+    print("  which. Nothing in the result distinguishes them, because nothing")
+    print("  in the result could - the difference is in the past, not in the")
+    print("  file. That is why D73 puts the fingerprint in the journal, before")
+    print("  the call, instead of trying to read the answer out afterwards.")
+    print()
+    print("  And when `new` CONTAINS `old`, the second call does not refuse at")
+    print("  all - it succeeds, and the edit is applied twice:")
+
+    target.write_bytes(b"FEE = 10\n")
+    _edit("= 10", "= 10 + 5")
+    _edit("= 10", "= 10 + 5")
+    print(f"    FEE = 10  ->  {target.read_bytes()!r}  <- applied twice, no error")
+
+    target.unlink(missing_ok=True)
 
 
 def main(argv: list[str]) -> int:
@@ -357,6 +475,9 @@ def main(argv: list[str]) -> int:
         index = args.index("--edit-child")
         edit_crash_child(args[index + 1], args[index + 2])
         return 0  # unreachable: the child always os._exit()s
+    if "--replay" in args:
+        replay_demo()
+        return 0
     if "--edit" in args:
         index = args.index("--edit")
         when = args[index + 1] if len(args) > index + 1 else None

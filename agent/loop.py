@@ -20,10 +20,18 @@ Decisions locked here (see docs/session-04.md A and docs/session-05.md A):
   D33 a batch is always answered in full, then the run stops
   D34 a duplicate tool-call id is answered and reported, not dropped
   D35 every budget is checked before the call it would authorise
+
+Session 9 adds two stops to the same machinery (see docs/session-09.md A):
+  D80 repetition is counted cumulatively per canonical call, not consecutively
+  D82 the model is warned once, in the conversation, before the stop
+  D86 a step whose request would not fit the context window is never started
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -33,6 +41,8 @@ from agent.budget import (
     LIMIT_STOPS,
     REFUSED_TOOL_ERROR,
     STOP_ANSWER,
+    STOP_CONTEXT_LIMIT,
+    STOP_REPETITION,
     STOP_SPEND_LIMIT,
     STOP_STEP_LIMIT,
     STOP_TIME_LIMIT,
@@ -44,8 +54,11 @@ from agent.budget import (
     check_before_tool_call,
     refusal_message,
 )
+from agent.context import ContextSize, measure
 from agent.journal import (
     MODEL_PENDING,
+    SCHEMA,
+    MODEL_RETRY,
     MODEL_RESULT,
     RUN_FINISHED,
     RUN_STARTED,
@@ -54,7 +67,16 @@ from agent.journal import (
     Journal,
     ResumeState,
 )
-from agent.model import ModelResponse, call_model
+from agent.model import ModelError, ModelResponse, call_model
+from agent.replay import (
+    CHANGED,
+    INTERRUPTED_TOOL_ERROR,
+    ReplayPlan,
+    before_fingerprint,
+    plans_for,
+)
+from agent.repetition import Repetition, Tally
+from agent.retry import RetryPolicy, plan_retry
 from agent.tools import TOOL_SCHEMAS, ToolResult, dispatch
 
 # Re-exported so callers that only care about stopping do not have to know
@@ -64,6 +86,8 @@ __all__ = [
     "DEFAULT_MAX_STEPS",
     "LIMIT_STOPS",
     "STOP_ANSWER",
+    "STOP_CONTEXT_LIMIT",
+    "STOP_REPETITION",
     "STOP_SPEND_LIMIT",
     "STOP_STEP_LIMIT",
     "STOP_TIME_LIMIT",
@@ -112,6 +136,27 @@ class LoopResult:
     # explicitly when a limit is reached, AND REPORT CHANGES ALREADY MADE";
     # until this session there were never any changes to report.
     changed_paths: list[str] = field(default_factory=list)
+    # Session 8, D74/D75. Every tool error this run produced, in order, and
+    # how many of them were a byte-identical repeat of a call that had already
+    # failed. Neither stops anything - they are the measurement that says
+    # whether Session 9 needs to.
+    tool_errors: list[str] = field(default_factory=list)
+    repeated_failures: int = 0
+    # Session 9. The same measurement for calls that SUCCEEDED, which D78
+    # argues about and which nothing counted before: a run that read one file
+    # nine times is not visible in `repeated_failures` at all.
+    repeated_calls: int = 0
+    # The longest run of one identical call, whatever its outcome. Present
+    # even when nothing stopped, because a number that only exists when a
+    # rule fires cannot tell you the threshold is wrong.
+    longest_repeat: int = 0
+    # The call that ended the run, named the way the model sent it. None
+    # unless stop_reason is `repetition`.
+    repetition_stopped_on: str | None = None
+    # Session 9, D85. The last measurement of the conversation this run made.
+    context: ContextSize | None = None
+    # Interrupted calls a resume refused to replay, by verdict (D72).
+    interrupted_calls: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -172,7 +217,9 @@ def assistant_message(response: ModelResponse) -> dict[str, Any]:
     return message
 
 
-def tool_message(call: dict[str, Any], result: ToolResult) -> dict[str, Any]:
+def tool_message(
+    call: dict[str, Any], result: ToolResult, *, note: str = ""
+) -> dict[str, Any]:
     """One tool result, addressed to the call it answers.
 
     D26: the error code goes INSIDE content, because content is the model's
@@ -182,12 +229,23 @@ def tool_message(call: dict[str, Any], result: ToolResult) -> dict[str, Any]:
 
     The truncation note matters for the same reason: a model that does not
     know it saw half a file will answer confidently about the missing half.
+
+    `note` is Session 9's D82 warning, and it is appended HERE rather than
+    inside the ToolResult on purpose. ToolResult is frozen precisely so the
+    loop cannot edit what the tool reported - a trace whose results were
+    rewritten after the fact no longer describes what the tool did. The
+    conversation is a different object: the loop is entitled to add its own
+    sentence to the message it writes, as long as the result it records
+    stays the tool's own. So the model reads one message, and the journal
+    keeps both halves distinguishable.
     """
     content = result.content
     if not result.ok:
         content = f"ERROR {result.error_code}: {content}"
     if result.truncated:
         content = f"{content}\n[truncated: this is not the whole result]"
+    if note:
+        content = f"{content}{note}"
     return {
         "role": "tool",
         # A call with no id cannot be answered; sending "" makes the provider
@@ -227,6 +285,16 @@ class _Run:
     resume: ResumeState | None = None
     on_response: Any = None
     on_tool: Any = None
+    on_context: Any = None
+    # The catalogue sent with every request. Held only so the context
+    # measurement can count it - the loop itself still receives it per call.
+    tools: list[dict[str, Any]] | None = None
+    # Session 8. The policy is a value (D65) and the clock is injected for the
+    # same reason model_fn is: a suite that really sleeps is a suite you stop
+    # running. Default: no retries, so every test written before this session
+    # still measures what it measured then.
+    retry: RetryPolicy = field(default_factory=RetryPolicy.off)
+    sleep: Any = time.sleep
     step: int = 0
     pending: list[dict[str, Any]] = field(default_factory=list)
     responses: list[ModelResponse] = field(default_factory=list)
@@ -234,6 +302,44 @@ class _Run:
     malformed: list[str] = field(default_factory=list)
     # D52. Appended only by _answer, only when a tool reported a change.
     changed: list[str] = field(default_factory=list)
+    # Session 8, D72. In-flight calls from a dead process, already decided.
+    # Empty for a fresh run; emptied as the resumed batch consumes it.
+    replay_plans: dict[str, ReplayPlan] = field(default_factory=dict)
+    interrupted: list[str] = field(default_factory=list)
+    # D74/D75. Error codes in order, and the (name, arguments) pairs that have
+    # already failed once, so an identical resend is countable.
+    errors: list[str] = field(default_factory=list)
+    # Session 9. `failed_before` and `repeats` were Session 8's measurement,
+    # kept honest but moved: the same counting, plus successes, plus path
+    # canonicalisation, now lives in `Tally` where a rule can read it.
+    tally: Tally = field(init=False)
+    stopped_on: Repetition | None = None
+    # The provider's exact prompt_tokens for the LAST request, which is the
+    # only exact context number that exists and is always one step stale.
+    last_prompt_tokens: int | None = None
+
+    def __post_init__(self) -> None:
+        self.tally = Tally(
+            root=self.root,
+            max_failures=self.budget.max_repeated_failures,
+            max_successes=self.budget.max_repeated_calls,
+        )
+
+    # ---- how big is the conversation --------------------------------------
+
+    def context(self) -> ContextSize:
+        """The history as the next request will carry it (D85).
+
+        Measured fresh every time rather than cached: the history grew since
+        the last measurement by exactly the tool results this step added,
+        which is the growth the check exists to notice.
+        """
+        return measure(
+            self.history,
+            tools=self.tools,
+            window=self.budget.context_window,
+            last_prompt_tokens=self.last_prompt_tokens,
+        )
 
     # ---- one model call ---------------------------------------------------
 
@@ -247,14 +353,20 @@ class _Run:
         MODEL_RESULT before any tool runs, so a resume never asks the model
         for a fresh plan while the old plan's tools have already executed.
 
-        A ModelError propagates. The loop does not retry (Session 8).
+        A ModelError propagates once the retry policy is out of answers,
+        carrying `attempts` so the caller can report how many requests were
+        sent rather than describing the last one as if it were the only one.
         """
         self.step += 1
         self._journal(MODEL_PENDING, step=self.step)
 
-        response = model_fn(self.history, tools=tools)
+        response = self._post_with_retries(model_fn, tools)
         self.responses.append(response)
         self.ledger.record_response(response)
+        # D85's error bar. The provider has now told us exactly what the
+        # history we just sent was worth; the estimate for the NEXT request
+        # is checked against it rather than trusted on its own.
+        self.last_prompt_tokens = response.prompt_tokens or None
 
         message = assistant_message(response)
         self.history.append(message)
@@ -263,6 +375,28 @@ class _Run:
             step=self.step,
             message=message,
             finish_reason=response.finish_reason,
+            # Session 10, D90. All three lived in `ModelResponse` - in RAM -
+            # and Session 8 settled what happens to things that live in RAM.
+            #
+            # `duration_ms` is the provider's own latency. The journal could
+            # almost derive it from the gap between model_pending.at and this
+            # record, and that number is wrong in the one case you care
+            # about: it swallows retry backoff and client overhead, so a run
+            # that slept 8s between two attempts reads as a slow model.
+            #
+            # `model` because a trace that cannot say which model answered
+            # cannot be compared with another trace, and Session 12 compares
+            # one variable at a time.
+            #
+            # `tools` because `--tools` versus not is a DIFFERENT AGENT and
+            # the single biggest confounder waiting for that comparison.
+            # Names plus a short digest of the schemas: the names answer
+            # "what could it call", the digest catches a description someone
+            # edited between two runs, which is a prompt change by another
+            # name and otherwise invisible.
+            duration_ms=round(response.duration_ms, 1),
+            model=response.model,
+            tools=self._tools_offered(tools),
             usage={
                 "prompt_tokens": response.prompt_tokens,
                 "completion_tokens": response.completion_tokens,
@@ -324,6 +458,24 @@ class _Run:
                 self.malformed.append(call_id)
             seen_ids.add(call_id)
 
+            # D72. Only ever non-empty on the first batch of a resumed run:
+            # these ids belong to calls the dead process entered and never
+            # answered. `pop` because an id is decided once - a second batch
+            # carrying the same id would be a provider bug, not a crash.
+            #
+            # Checked BEFORE the budget gate, and that is not a hole in D35.
+            # The gate exists to stop a call it would AUTHORISE; this call was
+            # authorised and executed by a process that no longer exists. A
+            # limit reached in the meantime cannot un-write the file, and
+            # answering "the tool-call limit stopped this" about an edit that
+            # already landed is the false report this whole phase is about.
+            # The slot is still counted, so the run stops at the next call
+            # rather than this one.
+            plan = self.replay_plans.pop(call_id, None)
+            if plan is not None and not plan.replays:
+                self._interrupted(call, plan)
+                continue
+
             # The gate is per call, not per batch: a batch of three with one
             # call left in the budget runs exactly one.
             if stop_reason is None:
@@ -332,7 +484,12 @@ class _Run:
             if stop_reason is not None:
                 self._refuse(call, stop_reason)
             else:
-                self._dispatch(call)
+                # Session 9. The only gate in this loop that runs AFTER the
+                # tool rather than before it, because the outcome is half of
+                # what it counts (see Tally.record). The batch still
+                # finishes: the calls behind this one are refused with the
+                # repetition reason, exactly as they would be for a budget.
+                stop_reason = self._dispatch(call)
 
         return stop_reason
 
@@ -354,35 +511,100 @@ class _Run:
             stop_reason=stop_reason,
         )
 
-    def _dispatch(self, call: dict[str, Any]) -> None:
-        """Run one tool call and answer it."""
+    def _dispatch(self, call: dict[str, Any]) -> str | None:
+        """Run one tool call, answer it, and say whether the run should stop."""
         function = call.get("function") or {}
+
+        name = function.get("name", "")
+        arguments = function.get("arguments", "")
 
         self._journal(
             TOOL_INTENT,
             step=self.step,
             call_id=call.get("id") or "",
-            name=function.get("name"),
-            arguments=function.get("arguments"),
+            name=name,
+            arguments=arguments,
+            # D73. What the file looked like a moment before the tool was
+            # entered. None for every tool that cannot write, so its absence
+            # on a read is silence rather than a gap. This is the record that
+            # makes "did the edit land?" answerable after the process is gone
+            # - Session 6's step 9, left open until now.
+            before=before_fingerprint(name, arguments, root=self.root),
         )
         # Counted before dispatch, not after: a tool that hangs or crashes
         # still consumed its slot. Counting on success is how a failing tool
         # gets retried forever inside its own budget.
         self.ledger.tool_calls += 1
-        result = dispatch(
-            function.get("name", ""), function.get("arguments", ""), root=self.root
+        result = dispatch(name, arguments, root=self.root)
+
+        # D74/D75. An unknown tool name and an unparseable argument list are
+        # already answered correctly; what was undecided is what they COST.
+        # They cost a tool call, like any other dispatch, because the slot was
+        # spent whether or not the tool existed. Counting the repeats is the
+        # rest of the answer: a model can send the same wrong call forever and
+        # nothing in this loop notices, so the loop is made to notice out loud
+        # rather than to stop - stopping is Session 9's decision to take.
+        if not result.ok:
+            self.errors.append(result.error_code or "error")
+
+        # Session 9. Counted after the answer is known, warned at one below
+        # the threshold, and stopped AT it. The tool message carries the
+        # warning (D82) so the model gets it in the only channel it reads;
+        # the ToolResult is left exactly as the tool returned it.
+        repetition = self.tally.record(name, arguments, ok=result.ok)
+        note = repetition.notice if self.tally.should_warn(repetition) else ""
+        self._answer(call, result, note=note, repeat=repetition.count)
+
+        if repetition.stops:
+            self.stopped_on = repetition
+            return STOP_REPETITION
+        return None
+
+    def _interrupted(self, call: dict[str, Any], plan: ReplayPlan) -> None:
+        """Answer a call the dead process entered and this one will not repeat.
+
+        The mirror of `_refuse`: an outcome with no intent of its own, because
+        the intent is already on disk - written by the process that died.
+
+        CHANGED is reported as a SUCCESS carrying `changed_path`, and that is
+        the whole point of D72. The alternative - replaying the edit - gets a
+        zero-match refusal, which tells the model its edit failed when the
+        file on disk says it succeeded. "The agent said it changed nothing and
+        the file changed" is the worst of the four outcomes, and it is the one
+        a naive replay produces every time.
+
+        The tool call is counted. It ran once already, in a process whose
+        outcome record never landed, so the ledger never saw it; not counting
+        it here is how a crash loop refills a tool budget.
+        """
+        landed = plan.verdict == CHANGED
+        self.ledger.tool_calls += 1
+        self.interrupted.append(plan.verdict)
+        result = ToolResult(
+            ok=landed,
+            content=plan.message,
+            error_code=None if landed else INTERRUPTED_TOOL_ERROR,
+            changed_path=plan.path if landed else None,
         )
-        self._answer(call, result)
+        if not landed:
+            self.errors.append(INTERRUPTED_TOOL_ERROR)
+        self._answer(
+            call,
+            result,
+            interrupted=plan.verdict,
+            before=plan.before,
+            now=plan.now,
+        )
 
     def _answer(
-        self, call: dict[str, Any], result: ToolResult, **extra: Any
+        self, call: dict[str, Any], result: ToolResult, *, note: str = "", **extra: Any
     ) -> None:
         """History, then journal, then the caller - in that order.
 
         Durable before the caller is told, so a crash inside `on_tool` still
         leaves a resumable journal.
         """
-        message = tool_message(call, result)
+        message = tool_message(call, result, note=note)
         self.history.append(message)
 
         # D51/D52. Collected HERE rather than in _dispatch, because _answer is
@@ -418,6 +640,7 @@ class _Run:
     ) -> LoopResult:
         """One exit. Every stop reason is journalled with the same totals, so
         a trace never has to be read differently depending on how it ended."""
+        context = self.context()
         self._journal(
             RUN_FINISHED,
             stop_reason=stop_reason,
@@ -425,6 +648,24 @@ class _Run:
             steps=self.ledger.steps,
             totals=self.ledger.snapshot(),
             cost_usd=self.ledger.spend(self.budget.pricing),
+            # Session 9, and an early answer to Session 10's self-test #8:
+            # both of today's numbers are written to disk at the one event
+            # every run produces. The per-signature counts are not - they are
+            # re-derivable from the tool_intent records, which is the cheaper
+            # place to keep them and the only place that survives a crash
+            # with no run_finished at all.
+            repeats={
+                "failures": self.tally.repeated_failures,
+                "calls": self.tally.repeated_calls,
+                "longest": self.tally.worst,
+                "stopped_on": self.stopped_on.describe if self.stopped_on else None,
+            },
+            context={
+                "messages": context.messages,
+                "estimated_tokens": context.estimated_tokens,
+                "last_prompt_tokens": context.last_prompt_tokens,
+                "window": context.window,
+            },
         )
         return LoopResult(
             text=text,
@@ -438,7 +679,95 @@ class _Run:
             budget=self.budget,
             malformed_call_ids=self.malformed,
             changed_paths=self.changed,
+            tool_errors=self.errors,
+            repeated_failures=self.tally.repeated_failures,
+            repeated_calls=self.tally.repeated_calls,
+            longest_repeat=self.tally.worst,
+            repetition_stopped_on=(
+                self.stopped_on.describe if self.stopped_on else None
+            ),
+            context=context,
+            interrupted_calls=self.interrupted,
         )
+
+    def _seconds_left(self) -> float | None:
+        """What the wall clock still allows, or None when it is unlimited.
+
+        A backoff is the only thing in this loop that spends time without
+        doing anything, which makes it the only one that has to ask (D70).
+        """
+        if self.budget.max_seconds is None:
+            return None
+        return self.budget.max_seconds - self.ledger.elapsed_s
+
+    def _post_with_retries(
+        self, model_fn: ModelFn, tools: list[dict[str, Any]] | None
+    ) -> ModelResponse:
+        """Send the request until it answers or the policy stops us.
+
+        Every decision is journaled BEFORE the sleep that follows it, so a
+        process killed mid-backoff still leaves a record of the attempt that
+        was already paid for.
+
+        A retry is not a step and not a tool call. It spends tokens the
+        provider never reported (a failed request can still be billed) and
+        seconds the wall clock notices by itself (D70).
+
+        `writes_done` is what makes this different from any other backoff:
+        once a tool in THIS run has changed the workspace, a request that may
+        already have arrived is no longer safe to send again (D69), and
+        `self.changed` is the loop's own record of exactly that.
+        """
+        attempt = 1
+        while True:
+            try:
+                return model_fn(self.history, tools=tools)
+            except ModelError as err:
+                plan = plan_retry(
+                    err,
+                    self.retry,
+                    attempt=attempt,
+                    writes_done=bool(self.changed),
+                    seconds_left=self._seconds_left(),
+                )
+                self._journal(
+                    MODEL_RETRY,
+                    step=self.step,
+                    attempt=attempt,
+                    kind=err.kind,
+                    retrying=plan.retry,
+                    delay_s=round(plan.delay_s, 3),
+                    reason=plan.reason,
+                    retryable=err.retryable,
+                    safe_to_retry=err.safe_to_retry,
+                )
+                if not plan.retry:
+                    # The caller sees the LAST failure - the one that matters -
+                    # carrying how many there were and the word for why we
+                    # stopped sending.
+                    err.attempts = attempt
+                    err.gave_up_because = plan.reason
+                    raise
+                self.sleep(plan.delay_s)
+                attempt += 1
+
+    @staticmethod
+    def _tools_offered(tools: list[dict[str, Any]] | None) -> dict[str, Any] | None:
+        """Which tools this request carried, small enough to write every step.
+
+        None means none were offered, which is a real configuration (the
+        plain `--tools`-less CLI) and must stay distinguishable from "not
+        recorded" - a generation-0 journal has no key here at all.
+        """
+        if not tools:
+            return None
+        names = [
+            (tool.get("function") or {}).get("name", "?") for tool in tools
+        ]
+        digest = hashlib.sha256(
+            json.dumps(tools, sort_keys=True).encode("utf-8")
+        ).hexdigest()[:12]
+        return {"names": names, "digest": digest}
 
     def _journal(self, event: str, **fields: Any) -> None:
         """No-op when the run is not journalled. The `if journal is not None`
@@ -457,6 +786,10 @@ def _start(
     resume: ResumeState | None,
     on_response: Any,
     on_tool: Any,
+    on_context: Any,
+    tools: list[dict[str, Any]] | None,
+    retry: RetryPolicy,
+    sleep: Any,
 ) -> _Run:
     """Build the run - from the first message, or from a journal.
 
@@ -480,11 +813,19 @@ def _start(
         resume=resume,
         on_response=on_response,
         on_tool=on_tool,
+        on_context=on_context,
+        tools=tools,
+        retry=retry,
+        sleep=sleep,
     )
 
     if resume is None:
         run._journal(
             RUN_STARTED,
+            # D94. One field per RUN, not per record: a reader needs to know
+            # what it is holding from line one, and a version on every line
+            # is a field written 1,600 times to answer a question asked once.
+            schema=SCHEMA,
             task=_task_of(run.history),
             messages=run.history,
             budget=budget.describe(),
@@ -499,8 +840,23 @@ def _start(
     run.history = list(resume.messages)
     run.step = resume.steps_done
     run.pending = list(resume.unanswered_calls)
+    # D72. Decided here, before the first batch runs and before anything is
+    # sent to the provider, because the verdict is a statement about the
+    # workspace as the resume found it. Reading the files later - after this
+    # run's own edits - would compare against a workspace this process had
+    # already changed.
+    run.replay_plans = plans_for(resume, root=root)
     run.ledger.steps = resume.steps_done
     run.ledger.tool_calls = resume.tool_calls_done
+    # A repetition counter that restarts on --resume is a counter you clear
+    # with `kill -9`, which is the argument D39 already made about tokens.
+    # Rebuilt from the journal's own tool_intent/tool_outcome pairs, so a run
+    # that was stuck before the crash is still stuck after it.
+    run.tally.seed(resume.calls_done)
+    # D52 across a restart. Also what makes D69 hold on a resumed run: a
+    # request that is not safe to send twice is not made safe by the process
+    # that made the edit having died.
+    run.changed = list(resume.changed_paths)
     run.ledger.record_usage(
         prompt_tokens=resume.prompt_tokens,
         completion_tokens=resume.completion_tokens,
@@ -520,8 +876,11 @@ def run_loop(
     model_fn: ModelFn = call_model,
     on_response=None,
     on_tool=None,
+    on_context=None,
     journal: Journal | None = None,
     resume: ResumeState | None = None,
+    retry: RetryPolicy | None = None,
+    sleep: Any = time.sleep,
 ) -> LoopResult:
     """Call, execute, feed back, repeat - until an answer or a limit.
 
@@ -535,7 +894,15 @@ def run_loop(
     ledger starts from what the dead process already spent (D39) - tokens and
     tool calls belong to the run, the wall clock to the process.
 
-    A ModelError propagates to the caller untouched.
+    `on_context` is called once per step with the measured size of the
+    history that is about to be sent (Session 9, D85). Optional, like the
+    other two callbacks: the loop measures either way, because the limit
+    depends on it - the callback only decides whether a human sees it.
+
+    `retry` decides what happens when the provider fails. The default is
+    RetryPolicy.off() - one attempt, which is what every session before this
+    one did. A ModelError still propagates to the caller untouched; what
+    changes is how many requests were sent before it did.
 
     The body below is the whole agent. Everything it calls is in `_Run`.
     """
@@ -548,6 +915,10 @@ def run_loop(
         resume=resume,
         on_response=on_response,
         on_tool=on_tool,
+        on_context=on_context,
+        tools=tools,
+        retry=retry or RetryPolicy.off(),
+        sleep=sleep,
     )
 
     # The answer was generated and paid for before the crash. Resuming it costs
@@ -566,7 +937,17 @@ def run_loop(
 
         # D35: before the POST. Covers the step limit, the clock, and anything
         # the next response would spend.
-        stop_reason = check_before_step(run.budget, run.ledger)
+        #
+        # D86 joins it here rather than becoming a second gate, because the
+        # question is identical - may the loop make another model call? - and
+        # two gates is how one of them gets forgotten at one of the call
+        # sites. The measurement happens whether or not anyone is watching.
+        context = run.context()
+        if run.on_context is not None:
+            run.on_context(run.step + 1, context)
+        stop_reason = check_before_step(
+            run.budget, run.ledger, history_tokens=context.estimated_tokens
+        )
         if stop_reason is not None:
             return run.finish(stop_reason)
 

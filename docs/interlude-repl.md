@@ -54,7 +54,7 @@ a single question.
 | D58 | History after a limit stop | **keep it** | Every tool_call_id in it was answered, so it stays valid; rolling back discards work already paid for. |
 | D59 | When the history gets too big | **warn then refuse** | Measured by the last turn's real `prompt_tokens`, not an estimate. 80% warns, the ceiling refuses. |
 | D60 | Ctrl-C | **abandon the turn** | The candidate-history pattern already makes this safe. |
-| D61 | In-band commands | **`:quit :cost :reset :history :help`** | Matched before anything reaches the model. `:reset` clears history, never the bill. |
+| D61 | In-band commands | **`:quit :cost :reset :history :help`** | Matched before anything reaches the model. `:reset` clears history, never the bill. Extended in section G: `/` as a second prefix, plus `/status` and `/trace`. |
 | D62 | Resuming a session | **restore, don't replay** | History and totals come back; an interrupted turn is NOT auto-finished - run_loop's `resume=` would double-count against totals rebuilt from the same file. |
 
 ### The hardest one is D54, and it has a trap in it
@@ -271,3 +271,61 @@ method. Not fixed - it is core code and outside this interlude's scope.
 session journal that is correct by luck rather than design: each turn's
 `run_started` carries the whole accumulated history, so the last one wins and
 is complete. Worth knowing before anyone changes what `run_started` records.
+
+
+---
+
+## G. The menu, added after the interlude
+
+The REPL printed everything and remembered nothing you could ask it for. Two
+commands and a prefix close that.
+
+| #    | Decision | Pick | Why |
+|------|----------|------|-----|
+| D100 | A journal is not always one run | **`tracing.segments()`** | `cli.py` writes one run per file, `chat.py` one run per TURN into a session journal (D56). Splitting on `run_started` is a reading, not something the writer should declare. |
+| D101 | Commands as a table | **one `COMMANDS` tuple** | Three consumers - the dispatcher, `:help`, the completion menu. The old shape kept a hand-written HELP string beside an if/elif chain: two places to edit, one to forget, and an undocumented command is a command nobody runs. |
+| D102 | `/status` vs `/cost` | **both** | `/cost` is a number you check against a budget. `/status` is what you run when the banner has scrolled away and you need the session id to `--resume`, the journal path `/trace` reads, or the reason the last turn was refused. It calls `refusal()` rather than re-deriving it, so the report cannot disagree with the gate. |
+| D103 | `/trace` reads the LIVE journal | **safe, and only because of the fsync** | Every append is flushed and fsynced before the side effect it authorises, so what is on disk mid-session is a complete account of what has already happened. The reader writes nothing (D89), so it cannot damage the session it describes. Default is the last turn - a trace you have to scroll is a trace you stop reading. |
+| D104 | What marks a command | **`:` by membership, `/` by shape** | `:` stays unambiguous. `/` cannot, because a POSIX path starts with one: answering "unknown command" to someone who asked about `/Users/...` reads as a REFUSAL, which is the worst available failure. So `/` is a command only when the first word is letters and dashes. A path fails that at the second slash and goes to the model as the question it is. |
+| D106 | A bare `/` or `:` | **prints the list** | The menu answers "what can I type here" before Enter is pressed - but the menu is the layer that can be absent (D105), and that is exactly the session where you cannot see the commands. Sending `/` to the model is a billed request whose answer is nothing. |
+| D107 | `turns` after a resume | **count runs, not steps** | `state.steps_done` counts `model_result` events. That is right for run_loop's own resume - one run, one step counter - and wrong here, where D56 puts many runs in one file. |
+| D105 | Where the menu may draw | **both streams must be a terminal** | prompt_toolkit renders by moving the cursor around stdout, and `python -m agent.chat > transcript` is a documented way to run this module. Redirected output falls back to `input()`, which still has readline history. |
+
+### Found by building it
+
+**`summary()` reads a chat session as one run.** It predates D100 and folds a
+whole journal into one row: the FIRST turn's task beside the LAST turn's
+totals, `processes` counting turns, and `resumed: true` for a conversation
+that never restarted. `requests`, `retries` and `changed_paths` are
+session-wide while `steps` and `total_tokens` are one turn's - the row mixes
+two scopes and reads as if it had one. Not fixed; `segments()` is the
+material for fixing it, and `test_the_row_still_reads_a_session_journal_as_one_run`
+pins today's behaviour so the fix cannot be silent. The open question is
+whether the row grows a `turns:` list or `chat.py` stops sharing a journal -
+and the second breaks D56 and `--resume`.
+
+**prompt_toolkit completions are asynchronous.** A test that pipes
+`"/st\t\n"` in one go gets back `"/st"`, because `accept-line` is processed
+before the completion task has run. It looks exactly like a broken completer.
+The fix is to yield to the event loop between keystrokes - not to sleep, which
+would be a test that fails on a loaded machine and proves nothing on a fast
+one.
+
+**A command the REPL did not recognise was answered by the model, for 3,155
+tokens.** Not hypothetical and not found by a test: session
+`20261116T115625-326026` has two runs in it, and the second one's `task` is
+`/history`. The old `task.startswith(":")` check did not match it, so it went
+through as a question, and the model gamely answered "there's no chat history
+in this session beyond what's above". The run that proves it is in `runs/`,
+and `tracing.segments()` is what makes it visible - `summary()` reports that
+journal as one run whose task is "give me all file list".
+
+Two things follow. An unrecognised command must never reach the model, which
+is D106. And the whole point of D104 is that the *other* failure - refusing a
+question because it starts with `/` - is worse, so the prefix rule has to
+separate `/history` from `/Users/sifat/notes.md` without a round trip.
+
+**Code changes do not reach a running REPL.** Python loaded `agent/chat.py`
+when the process started. A session that was already open when a command was
+added does not have it, and the symptom is the one above: the new command
+goes to the model. Restart, or `--resume=<id>`, which is lossless.
