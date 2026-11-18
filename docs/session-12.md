@@ -83,7 +83,7 @@ reproduce is a blog post.
 
 ### Phase 0 — Make the suite able to show a difference
 
-- [ ] **Step 1 — Measure the ceiling.**
+- [x] **Step 1 — Measure the ceiling.** _(Arm A passed 57/60; 19/20 cases were 3/3, so the report records that the suite remained highly saturated.)_
   - Build: nothing. Run Session 11's ten cases three times and look at the
     baseline.
   - Test: how many cases pass 3/3? Those cases can only ever get worse; they
@@ -92,7 +92,7 @@ reproduce is a blog post.
     That number, not twenty, is what decides whether today can conclude
     anything.
 
-- [ ] **Step 2 — Add difficulty deliberately.**
+- [x] **Step 2 — Add difficulty deliberately.** _(Twenty cases, including four reserved, were frozen. Arm A was below 100% at 57/60, but failures concentrated in one case; the report treats that limited discrimination as a suite limitation.)_
   - Build: the ten new cases, aimed at the gap. Bigger files so an anchor is
     genuinely ambiguous; a second occurrence that is *not* adjacent; a task
     whose obvious reading is wrong.
@@ -103,7 +103,7 @@ reproduce is a blog post.
 
 ### Phase 1 — Pre-registration
 
-- [ ] **Step 3 — Write the hypothesis down, in the repo, first.**
+- [x] **Step 3 — Write the hypothesis down, in the repo, first.** _(D112–D122 and expected direction are committed in `evals/results/session-12-protocol-v2.json`; report records commit `f0e783f`.)_
   - Build: a file in `evals/results/` holding D112–D122 filled in, the date,
     the git sha, and one sentence: *what I expect to happen and why.*
   - Test: it is committed before the first run of Phase 2.
@@ -111,7 +111,7 @@ reproduce is a blog post.
     remembered. The experiment that produced a null result there was
     trustworthy because the protocol was fixed before the second arm ran.
 
-- [ ] **Step 4 — Estimate the bill before you spend it.**
+- [x] **Step 4 — Estimate the bill before you spend it.** _($0.227893 estimated against a $0.50 ceiling; actual recorded cost was $0.073872.)_
   - Build: D119. Twenty cases × three runs × two arms is 120 runs; multiply by
     the mean tokens per run from Session 11's rows and the configured prices.
   - Test: the runner refuses to start if the estimate exceeds the ceiling, and
@@ -121,13 +121,13 @@ reproduce is a blog post.
 
 ### Phase 2 — The comparison
 
-- [ ] **Step 5 — Interleave the arms.**
+- [x] **Step 5 — Interleave the arms.** _(The 120 result rows validate against the registered A/B order.)_
   - Build: D113. Run A, B, A, B per case rather than all of A then all of B.
   - Test: the run order is recorded per row.
   - Review: providers change under you — load, routing, silent model updates.
     Blocked order confounds the variable with the hour of the day.
 
-- [ ] **Step 6 — Run it, and do not look early.**
+- [x] **Step 6 — Run it, and do not look early.** _(All 120 live rows completed; the first sandbox-blocked attempt is retained separately and excluded.)_
   - Test: 120 rows in `evals/results/`.
   - Review: stopping early because arm B "looks better" after nine cases is how
     you get a result that does not reproduce. The ceiling is the budget, not
@@ -135,25 +135,25 @@ reproduce is a blog post.
 
 ### Phase 3 — The report
 
-- [ ] **Step 7 — Rows to a table.**
+- [x] **Step 7 — Rows to a table.** _(Report is regenerated from `session-12-live-complete.jsonl`.)_
   - Build: per arm — success rate, unexpected changes, tool calls, model
     requests, duration, tokens, estimated cost, stop-reason distribution. Per
     case — the paired outcome: both passed, both failed, A only, B only.
   - Test: every number recomputes from the rows alone.
 
-- [ ] **Step 8 — Apply the rule you wrote in Step 3.**
+- [x] **Step 8 — Apply the rule you wrote in Step 3.** _(The measured 1.7-point gain and McNemar p=1.0 fail the preregistered ship rule.)_
   - Build: D115, mechanically. The flip counts are the evidence; quote them
     with the test and the interval, not just the two percentages.
   - Review: write the sentence out — *"the change flipped N cases to passing and
     M to failing, which is / is not enough to ship under the rule I set"* — and
     put it at the top of the report.
 
-- [ ] **Step 9 — Report the cost, not just the score.**
+- [x] **Step 9 — Report the cost, not just the score.** _(Token and latency ratios are 1.064 and 1.095; both meet their ceilings.)_
   - Build: D122. Tokens and latency per arm, and the trade-off rule applied.
   - Review: an improvement that costs 40% more tokens per task is a different
     product, not a better one, unless you said in advance that it was.
 
-- [ ] **Step 10 — Unseal the held-out cases.**
+- [x] **Step 10 — Unseal the held-out cases.** _(All 12 held-out pairs passed in both arms; no held-out reversal.)_
   - Test: run both arms on the reserved cases. If the effect disappears, you
     tuned to the suite — which is a finding about your process, and the most
     valuable thing today can produce.

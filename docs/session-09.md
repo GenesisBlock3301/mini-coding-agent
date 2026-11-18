@@ -468,7 +468,7 @@ and make sure Session 11's suite contains a task that needs the banned pattern.
   fresh enough; inside a run the history grows by a 30KB tool result between
   one check and the next, and a number from before that result is a number
   about a different conversation. Two measures of one quantity is a smell
-  worth re-reading in Session 13, where a server process has both.
+  worth re-reading when a local interactive session has both.
 - **The context window is a configured default, not a measurement.** 65536
   for DeepSeek, 32768 for Ollama - the figure we tell people to serve, not
   the one `ollama serve` actually hands out (4096). `model.context_warning`

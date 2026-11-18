@@ -78,6 +78,7 @@ STOP_SPEND_LIMIT = "spend_limit"
 # the "claimed success" failure Session 7 built a verifier to catch.
 STOP_REPETITION = "repetition"
 STOP_CONTEXT_LIMIT = "context_limit"
+STOP_CANCELLED = "cancelled"
 
 LIMIT_STOPS = (
     STOP_STEP_LIMIT,
@@ -456,6 +457,8 @@ def refusal_message(stop_reason: str, budget: Budget) -> str:
     limit matters - "cancelled" invites a retry, "the run's tool budget is
     spent" does not.
     """
+    if stop_reason == STOP_CANCELLED:
+        return "Not run: this run was cancelled. No file was read or changed by this call."
     if stop_reason == STOP_TOOL_LIMIT:
         return (
             f"Not run: this run's tool-call budget ({budget.max_tool_calls}) is "

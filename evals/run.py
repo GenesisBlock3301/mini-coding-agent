@@ -60,10 +60,14 @@ def digest(value) -> str:
 
 def code_version() -> dict:
     """Include dirty/untracked implementation bytes; a SHA alone hides local work."""
-    sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True)
-    status = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True)
+    try:
+        sha = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=ROOT, capture_output=True, text=True)
+        status = subprocess.run(['git', 'status', '--porcelain'], cwd=ROOT, capture_output=True, text=True)
+        revision, dirty = sha.stdout.strip() or None, bool(status.stdout.strip())
+    except FileNotFoundError:
+        revision, dirty = None, None
     files = [p for folder in ('agent', 'evals', 'scripts') for p in (ROOT/folder).rglob('*.py')]
-    return dict(sha=sha.stdout.strip() or None, dirty=bool(status.stdout.strip()),
+    return dict(sha=revision, dirty=dirty,
                 digest=digest({str(p.relative_to(ROOT)): p.read_text() for p in sorted(files)}))
 
 
@@ -169,7 +173,7 @@ def trace_metrics(trace) -> dict:
 
 def run_case(case, *, mode, run_id, workspace, journal_path, budget, config=None,
              model_fn=None, timeout=120, check_timeout=5, metadata=None,
-             system_prompt=TOOLS_SYSTEM_PROMPT) -> dict:
+             system_prompt=TOOLS_SYSTEM_PROMPT, memory_text='') -> dict:
     started = time.monotonic()
     base = dict(schema=1, case=case.name, category=case.category, mode=mode,
                 run_id=run_id, workspace=str(workspace), journal=str(journal_path),
@@ -182,9 +186,12 @@ def run_case(case, *, mode, run_id, workspace, journal_path, budget, config=None
                 provider=config.provider.name if config else 'scripted',
                 endpoint=config.base_url if config else None,
                 timeout_s=timeout, check_timeout_s=check_timeout, **(metadata or {}))
+    base['memory'] = dict(sha256=hashlib.sha256(memory_text.encode('utf-8')).hexdigest(),
+                          bytes=len(memory_text.encode('utf-8')))
     # Kept in the start record too, so an orphan journal identifies its case.
     journal = EvalJournal(journal_path, dict(case=case.name, run_id=run_id,
-                          suite=base.get('suite'), variant=mode, repeat=base.get('repeat')))
+                          suite=base.get('suite'), variant=mode, repeat=base.get('repeat'),
+                          memory=base.get('memory')))
     spent = 0.0
     def live_model(messages, *, tools=None):
         nonlocal spent
@@ -206,8 +213,12 @@ def run_case(case, *, mode, run_id, workspace, journal_path, budget, config=None
     old_timeout = fixture.CHECK_TIMEOUT_S
     fixture.CHECK_TIMEOUT_S = check_timeout
     try:
-        result = run_loop([dict(role='system', content=system_prompt),
-                           dict(role='user', content=case.task)], root=workspace,
+        messages = [dict(role='system', content=system_prompt)]
+        if memory_text:
+            from agent.memory import memory_message
+            messages.append(memory_message(memory_text))
+        messages.append(dict(role='user', content=case.task))
+        result = run_loop(messages, root=workspace,
                           budget=budget, journal=journal, retry=RetryPolicy.off(),
                           model_fn=model_fn or (live_model if mode == 'live' else scripted_model(case, mode)))
         trace = tracing.load(journal_path)
@@ -289,7 +300,8 @@ def worker(request: dict) -> dict:
                     workspace=Path(request['workspace']), journal_path=Path(request['journal']),
                     budget=Budget(**values), config=config, timeout=request['timeout'],
                     check_timeout=request['check_timeout'], metadata=request['metadata'],
-                    system_prompt=request.get('system_prompt', TOOLS_SYSTEM_PROMPT))
+                    system_prompt=request.get('system_prompt', TOOLS_SYSTEM_PROMPT),
+                    memory_text=request.get('memory_text', ''))
 
 
 def isolated_run(request: dict) -> dict:
@@ -355,7 +367,9 @@ def isolated_run(request: dict) -> dict:
                 verdict='error', failures=[reason], cost_usd=None,
                 cost_uncertain=request['mode'] == 'live',
                 duration_s=round(time.monotonic()-started, 4), metrics=trace_metrics(trace),
-                **request['metadata'])
+                **request['metadata'],
+                memory=dict(sha256=hashlib.sha256(request.get('memory_text', '').encode('utf-8')).hexdigest(),
+                            bytes=len(request.get('memory_text', '').encode('utf-8'))))
 
 
 def run_suite(names, *, mode, repeats, output, timeout, check_timeout, max_spend,

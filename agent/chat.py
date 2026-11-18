@@ -66,9 +66,10 @@ from agent.cli import (
 from agent.journal import Journal, JournalCorrupt, new_run_id, rebuild
 from agent.loop import LoopResult, run_loop, tool_message
 from agent.model import ModelConfig, ModelError, active_provider, call_model, context_warning
-from agent.storage import workspace_root
+from agent.storage import workspace_root, recorded_workspace
 from agent.retry import RetryPolicy
 from agent.tools import TOOL_SCHEMAS, ToolResult
+from agent.memory import read_memory, memory_message, approve_user_fact
 from agent.tracing import load as load_journal, segments, timeline
 
 try:  # Arrow-key history for input(), for one import. Absent on some platforms.
@@ -86,8 +87,9 @@ DEFAULT_MAX_CONTEXT_TOKENS = 48_000
 CONTEXT_WARN_FRACTION = 0.8
 
 RESUME_FLAG = "--resume="
+CONTINUE_FLAG = "--continue"
 USAGE = (
-    "usage: python -m agent.chat [--resume=<session_id>]\n"
+    "usage: python -m agent.chat [--resume=<session_id> | --continue] [--workspace=DIR]\n"
     "\nSession limits come from .env: MAX_SESSION_TOKENS, MAX_SESSION_SPEND\n"
     "(needs PRICE_*), MAX_CONTEXT_TOKENS. Per-turn limits are the usual\n"
     "MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS."
@@ -143,6 +145,7 @@ class Session:
     # the old behaviour; main() passes RetryPolicy.from_env().
     retry: RetryPolicy = field(default_factory=RetryPolicy.off)
     history: list[dict[str, Any]] = field(default_factory=list)
+    memory_proposal: str | None = None
 
     turns: int = 0
     prompt_tokens: int = 0
@@ -313,10 +316,15 @@ def start_session(
 
     if resume_id is None:
         session_id = new_run_id()
+        text, digest, path = read_memory(root)
+        print(f"memory: {path} (sha256 {digest})", file=sys.stderr)
+        history = [{"role": "system", "content": TOOLS_SYSTEM_PROMPT}]
+        if text:
+            history.append(memory_message(text))
         return Session(
             journal=Journal.create(RUNS_DIR, session_id),
             session_id=session_id,
-            history=[{"role": "system", "content": TOOLS_SYSTEM_PROMPT}],
+            history=history,
             **common,
         )
 
@@ -335,7 +343,12 @@ def start_session(
         )
 
     try:
-        state = rebuild(journal.events())
+        events = journal.events()
+        starts = [e for e in events if e.get("t") == "run_started"]
+        if starts and starts[0].get("workspace") and Path(starts[0]["workspace"]).resolve() != root.resolve():
+            print("error [workspace]: journal belongs to a different workspace", file=sys.stderr)
+            return None
+        state = rebuild(events)
     except JournalCorrupt as err:
         print(f"error [journal_corrupt]: {err}", file=sys.stderr)
         return None
@@ -511,7 +524,8 @@ def _cmd_history(session: Session) -> bool:
 
 
 def _cmd_reset(session: Session) -> bool:
-    session.history = [{"role": "system", "content": TOOLS_SYSTEM_PROMPT}]
+    # Preserve the snapshot read at session start when resetting conversation.
+    session.history = [m for m in session.history[:2] if m.get("role") == "system"]
     session.context_tokens = 0
     # Totals are NOT cleared: money already spent is still spent, and a
     # command that silently refills a budget is a budget with a loophole.
@@ -532,11 +546,45 @@ def _cmd_quit(session: Session) -> bool:
     return False
 
 
+def _cmd_remember(session: Session, argument: str = "") -> bool:
+    if not argument or not any(m.get("role") == "user" and m.get("content") == argument
+                               for m in session.history):
+        print("Proposal refused: provide an exact single-line statement you previously sent; file and model text are not eligible.", file=sys.stderr)
+        session.memory_proposal = None
+        return True
+    session.memory_proposal = argument
+    print(f"Proposed memory (source: your message): {argument}\nType /approve-memory to save it, or /cancel-memory to discard it.", file=sys.stderr)
+    return True
+
+
+def _cmd_approve_memory(session: Session) -> bool:
+    fact = session.memory_proposal
+    session.memory_proposal = None
+    if fact is None:
+        print("No memory proposal to approve.", file=sys.stderr)
+        return True
+    try:
+        path = approve_user_fact(session.root, fact, fact)
+        print(f"Saved to {path}; takes effect in a new session.", file=sys.stderr)
+    except (ValueError, OSError, UnicodeError) as exc:
+        print(f"Memory not saved: {exc}", file=sys.stderr)
+    return True
+
+
+def _cmd_cancel_memory(session: Session) -> bool:
+    session.memory_proposal = None
+    print("Memory proposal discarded.", file=sys.stderr)
+    return True
+
+
 COMMANDS: tuple[Command, ...] = (
     Command("status", "current session metrics", _cmd_status),
     Command("trace", "execution timeline   [all|<n>] [full]", _cmd_trace, takes_argument=True),
     Command("cost", "token usage and estimated cost", _cmd_cost),
     Command("history", "how many messages the model is being sent", _cmd_history),
+    Command("remember", "propose an exact user statement", _cmd_remember, takes_argument=True),
+    Command("approve-memory", "save the current proposal", _cmd_approve_memory),
+    Command("cancel-memory", "discard the current proposal", _cmd_cancel_memory),
     Command("reset", "forget the conversation, keep the budget spent", _cmd_reset),
     Command("help", "this", _cmd_help),
     Command("quit", "end the session", _cmd_quit, aliases=("q", "exit")),
@@ -668,14 +716,42 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
         print(result.text)
 
 
-def _parse_resume_flag(argv: list[str] | None) -> tuple[str | None, bool]:
-    """(resume_id, ok). `ok` is False when an argument was not understood."""
+def _parse_resume_flag(argv: list[str] | None) -> tuple[str | None, str | None, bool]:
+    """(resume_id, workspace, ok)."""
     resume_id: str | None = None
+    workspace: str | None = None
     for argument in (argv or [])[1:]:
+        if argument.startswith("--workspace="):
+            if workspace is not None or not argument[len("--workspace="):]:
+                return None, None, False
+            workspace = argument[len("--workspace="):]
+            continue
+        if argument == CONTINUE_FLAG:
+            if resume_id is not None:
+                return None, None, False
+            resume_id = CONTINUE_FLAG
+            continue
         if not argument.startswith(RESUME_FLAG):
-            return None, False
+            return None, None, False
+        if resume_id is not None:
+            return None, None, False
         resume_id = argument[len(RESUME_FLAG) :]
-    return resume_id, True
+    return resume_id, workspace, True
+
+
+def latest_session(root: Path) -> str | None:
+    """Choose the most recently started journal for this workspace."""
+    candidates = []
+    for path in RUNS_DIR.glob("*.jsonl"):
+        try:
+            events = Journal(path).events()
+            starts = [e for e in events if e.get("t") == "run_started"
+                      and e.get("workspace") == str(root.resolve())]
+            if starts:
+                candidates.append((starts[0].get("at", 0), path.stem))
+        except (OSError, JournalCorrupt, ValueError):
+            continue
+    return max(candidates)[1] if candidates else None
 
 
 def _spend_limit_without_prices(turn_limits: Budget) -> bool:
@@ -881,7 +957,7 @@ def main(
     """
     load_dotenv()
 
-    resume_id, ok = _parse_resume_flag(argv)
+    resume_id, selected_workspace, ok = _parse_resume_flag(argv)
     if not ok:
         print(USAGE, file=sys.stderr)
         return 2
@@ -906,7 +982,33 @@ def main(
     # retry policy the two entry points disagree about is two agents.
     retry = RetryPolicy.from_env()
 
-    session = start_session(turn_limits, workspace_root(), resume_id, retry)
+    root = workspace_root(selected_workspace)
+    if resume_id == CONTINUE_FLAG:
+        resume_id = latest_session(root)
+        if resume_id is None:
+            print("error [no_journal]: no session for this workspace", file=sys.stderr)
+            return 2
+    if resume_id is not None:
+        try:
+            recorded = recorded_workspace(RUNS_DIR, resume_id)
+        except FileNotFoundError as exc:
+            print(f"error [no_journal]: {exc}", file=sys.stderr)
+            return 2
+        except (JournalCorrupt, ValueError, OSError) as exc:
+            print(f"error [resume]: {exc}", file=sys.stderr)
+            return 2
+        if selected_workspace is not None and root != recorded:
+            print("error [workspace]: --workspace conflicts with the journal", file=sys.stderr)
+            return 2
+        root = recorded
+    if not root.is_dir():
+        print(f"error [workspace]: {root} is missing", file=sys.stderr)
+        return 2
+    try:
+        session = start_session(turn_limits, root, resume_id, retry)
+    except (ValueError, OSError, UnicodeError) as exc:
+        print(f"error [memory]: {exc}", file=sys.stderr)
+        return 2
     if session is None:
         return 2
     session.model_label = model_label(provider)

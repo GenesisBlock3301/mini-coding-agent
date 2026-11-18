@@ -321,7 +321,7 @@ below.
     so "newest" would be wrong for one hour a year in any zone that observes
     DST (this one does not)
   - two machines in different zones produce ids that interleave wrongly, which
-    Session 13's concurrent runs and any shared `runs/` directory would hit
+    independent local runs and any shared `runs/` directory would hit
   - a reader comparing an id to a UTC timestamp from anywhere else is simply
     wrong, silently
 
@@ -550,7 +550,7 @@ gzip over all journals: 595 KB -> 182 KB (3.3x, measured)
 At 55 KB/day this is not a disk problem and will not become one: twenty years
 of it is 400 MB. **The pressure is not bytes, it is files and parsing.**
 Session 11 runs twenty tasks three times - sixty journals in an afternoon,
-five days of today's rate - and Session 13 adds concurrent runs. Every
+five days of today's rate - and interactive use adds more. Every
 question asked across runs is then a glob plus a full parse of every record to
 answer one `GROUP BY`. `scripts/repeat_audit.py` already does exactly that
 over 132 files, and it is the shape of every audit that follows it.

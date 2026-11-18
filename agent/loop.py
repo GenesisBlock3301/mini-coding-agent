@@ -41,6 +41,7 @@ from agent.budget import (
     LIMIT_STOPS,
     REFUSED_TOOL_ERROR,
     STOP_ANSWER,
+    STOP_CANCELLED,
     STOP_CONTEXT_LIMIT,
     STOP_REPETITION,
     STOP_SPEND_LIMIT,
@@ -295,6 +296,8 @@ class _Run:
     # still measures what it measured then.
     retry: RetryPolicy = field(default_factory=RetryPolicy.off)
     sleep: Any = time.sleep
+    dispatcher: Any = None
+    cancelled: Any = None
     step: int = 0
     pending: list[dict[str, Any]] = field(default_factory=list)
     responses: list[ModelResponse] = field(default_factory=list)
@@ -481,6 +484,8 @@ class _Run:
             if stop_reason is None:
                 stop_reason = check_before_tool_call(self.budget, self.ledger)
 
+            if self.cancelled is not None and self.cancelled():
+                stop_reason = STOP_CANCELLED
             if stop_reason is not None:
                 self._refuse(call, stop_reason)
             else:
@@ -535,7 +540,7 @@ class _Run:
         # still consumed its slot. Counting on success is how a failing tool
         # gets retried forever inside its own budget.
         self.ledger.tool_calls += 1
-        result = dispatch(name, arguments, root=self.root)
+        result = (self.dispatcher or dispatch)(name, arguments, root=self.root)
 
         # D74/D75. An unknown tool name and an unparseable argument list are
         # already answered correctly; what was undecided is what they COST.
@@ -790,6 +795,8 @@ def _start(
     tools: list[dict[str, Any]] | None,
     retry: RetryPolicy,
     sleep: Any,
+    dispatcher: Any,
+    cancelled: Any,
 ) -> _Run:
     """Build the run - from the first message, or from a journal.
 
@@ -817,6 +824,8 @@ def _start(
         tools=tools,
         retry=retry,
         sleep=sleep,
+        dispatcher=dispatcher,
+        cancelled=cancelled,
     )
 
     if resume is None:
@@ -881,6 +890,8 @@ def run_loop(
     resume: ResumeState | None = None,
     retry: RetryPolicy | None = None,
     sleep: Any = time.sleep,
+    dispatcher=None,
+    cancelled=None,
 ) -> LoopResult:
     """Call, execute, feed back, repeat - until an answer or a limit.
 
@@ -919,6 +930,8 @@ def run_loop(
         tools=tools,
         retry=retry or RetryPolicy.off(),
         sleep=sleep,
+        dispatcher=dispatcher,
+        cancelled=cancelled,
     )
 
     # The answer was generated and paid for before the crash. Resuming it costs
@@ -927,6 +940,8 @@ def run_loop(
         return run.finish(STOP_ANSWER, text=resume.answer_text, replayed=True)
 
     while True:
+        if cancelled is not None and cancelled() and not run.pending:
+            return run.finish(STOP_CANCELLED)
         # Tool calls the dead process never answered, plus the normal path.
         # An empty batch is a no-op, which is what keeps this body flat.
         stop_reason = run.run_pending()
@@ -934,6 +949,9 @@ def run_loop(
         # --resume can pick it up from here.
         if stop_reason is not None:
             return run.finish(stop_reason)
+
+        if cancelled is not None and cancelled():
+            return run.finish(STOP_CANCELLED)
 
         # D35: before the POST. Covers the step limit, the clock, and anything
         # the next response would spend.

@@ -43,8 +43,10 @@ class RuntimePaths:
 
 
 PATHS = RuntimePaths(Path(__file__).resolve().parents[1])
-JOURNALS_DIR = PATHS.journals
-EVAL_WORKSPACES_DIR = PATHS.eval_workspaces
+JOURNALS_DIR = Path(os.getenv("RUNS_DIR", str(PATHS.journals))).expanduser().resolve()
+EVAL_WORKSPACES_DIR = Path(
+    os.getenv("EVAL_WORKSPACES_DIR", str(PATHS.eval_workspaces))
+).expanduser().resolve()
 
 
 def workspace_root(override=None) -> Path:
@@ -52,3 +54,14 @@ def workspace_root(override=None) -> Path:
     from agent.policy import workspace_root as policy_workspace_root
     raw = override or os.getenv('WORKSPACE_DIR')
     return policy_workspace_root(PATHS.resolve_artifact(raw) if raw else None)
+
+
+def recorded_workspace(directory: Path, run_id: str) -> Path:
+    """Read a journal's workspace before choosing a root or making a model call."""
+    from agent.journal import Journal, JournalCorrupt
+
+    events = Journal.open(directory, run_id).events()
+    starts = [event for event in events if event.get('t') == 'run_started']
+    if not starts or not isinstance(starts[0].get('workspace'), str):
+        raise ValueError('journal has no recorded workspace')
+    return PATHS.resolve_artifact(starts[0]['workspace']).resolve()

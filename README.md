@@ -4,16 +4,32 @@ A small coding agent built from scratch (Python + DeepSeek API, no agent
 framework) to understand how an agent chooses actions, where it fails, and
 whether a change actually improves it.
 
-Plan and milestones: [`mini-coding-agent-plan.md`](mini-coding-agent-plan.md)
+It runs in the terminal, like Codex or Claude Code. Model provider requests
+are outbound; the application does not run an HTTP API.
 
-## Setup
+Plan and milestones: [`mini-coding-agent-plan.md`](docs/mini-coding-agent-plan.md)
+
+## Quickstart
+
+Prerequisites: Python 3.12, Git, and a model provider for live tasks. The
+offline demo and tests need no key or network after dependencies are installed.
 
 ```bash
+git clone https://github.com/GenesisBlock3301/mini-coding-agent.git
+cd mini-coding-agent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # then fill in DEEPSEEK_APIKEY
+python scripts/make_fixtures.py
+python scripts/demo.py
 ```
+
+For live use, run `cp .env.example .env` and set `DEEPSEEK_APIKEY`, or
+configure `PROVIDER=ollama` and start Ollama. The demo's first act can use the
+configured provider with `python scripts/demo.py --live`. Start with the
+generated `playground/` or a disposable fixture before pointing the agent at
+real code. Inspect the edited files and verifier output independently of the
+agent's final explanation.
 
 ## Usage
 
@@ -21,7 +37,13 @@ cp .env.example .env   # then fill in DEEPSEEK_APIKEY
 python -m agent.cli "what's in the awkward folder?" --tools
 python -m agent.cli --resume=<run_id>     # continue a crashed run
 python -m agent.chat                      # interactive session (interlude)
+python -m agent.chat --continue           # latest session in this workspace
+python -m agent.chat --workspace=/path/to/project
 ```
+
+With `--tools`, the agent can create a new UTF-8 text file using `write_file`.
+It cannot overwrite an existing path; use `replace_text` to edit an existing
+file. File creation is limited to 64 KB and an existing parent directory.
 
 Against a fixture project — a fresh workspace per run, graded by a checker the
 agent cannot see:
@@ -130,6 +152,63 @@ and warn.
 
 `.env` and anything real live outside `playground/`.
 
+`RUNS_DIR`, `EVAL_WORKSPACES_DIR`, `WORKSPACE_DIR`, and
+`MINI_AGENT_MEMORY_DIR` can move journals, disposable evaluation workspaces,
+the active workspace, and human-maintained notes independently. A resumed run
+uses the workspace recorded in its journal. An explicit conflicting
+`--workspace` is refused before a model request; a missing recorded workspace
+is also refused. `--continue` selects the most recent journal started in the
+selected workspace, including a finished session. Use `--resume=<id>` when
+the exact session matters.
+
+## Container
+
+The image contains source, fixture templates, tests and the Session 12 report.
+It runs as UID 10001 by default. It contains no `.env`, journals, memory or
+host workspace. Build from a fresh checkout:
+
+```bash
+docker build --no-cache -t mini-coding-agent .
+docker run --rm --entrypoint python mini-coding-agent scripts/demo.py
+docker run --rm --entrypoint sh mini-coding-agent -c \
+  'python scripts/make_fixtures.py && touch playground/.gitkeep && env -u WORKSPACE_DIR -u RUNS_DIR \
+   -u EVAL_WORKSPACES_DIR -u MINI_AGENT_MEMORY_DIR python -m pytest -q'
+```
+
+The test command clears deployment paths because fixture tests exercise the
+project's default generated `playground/`. To keep state across containers,
+create three host directories and mount them. On Linux, use your host UID and
+GID for writable bind mounts:
+
+```bash
+mkdir -p .local-state/journals .local-state/workspaces .local-state/memory
+docker run --rm -it --user "$(id -u):$(id -g)" --env-file .env \
+  --mount type=bind,src="$PWD/.local-state",dst=/state \
+  --mount type=bind,src="$PWD/playground",dst=/workspace \
+  mini-coding-agent --tools "list the files in this workspace"
+```
+
+For a read-only memory container, add
+`--mount type=bind,src="$PWD/.local-state/memory",dst=/state/memory,readonly`.
+The interactive `/approve-memory` command needs a writable memory mount;
+otherwise edit notes on the host. Notes remain outside the workspace either
+way. To resume after replacing the container,
+run the same mount command with `--resume=<run_id>`; both the journal and
+workspace must still be present. For host Ollama, set
+`OLLAMA_BASE_URL=http://host.docker.internal:11434/v1` in the container and
+start Ollama with a context length large enough for the run. Send hosted keys
+at runtime through an environment file; never add `.env` to the image.
+
+## Boundary and limits
+
+The agent's tools can read and edit only under one selected directory. It has
+no command execution, browsing, package installation, multi-agent work,
+compaction or retrieval. Path checks are not a sandbox, and Docker alone is
+not a complete security boundary: a hostile process sharing the workspace can
+defeat path checks. The container bounds what a mistake can touch; it does not
+make untrusted tasks safe by itself. The verifier checks fixture outcomes, but
+a passing fixture does not prove a change to a real project is correct.
+
 Generated execution data lives under the gitignored `.runtime/` directory:
 
 ```text
@@ -163,7 +242,8 @@ locations. Historical session notes may still refer to `runs/`.
 `docs/mini-coding-agent-plan.md` is the course plan. One doc per session, each
 with the decisions it locked, the build order, a failure table, the invariants
 carried forward and a self-test — written before the code and updated with what
-actually happened. Sessions 12-15 are written and not yet built.
+actually happened. Session 13 is implemented; Sessions 12, 14 and 15 remain
+open in the progress list below.
 
 ## Progress
 
@@ -191,10 +271,10 @@ actually happened. Sessions 12-15 are written and not yet built.
       JSONL rows and summaries, deadlines and spend ceiling; scripted 10/10,
       live 10/10 then 30/30. These small fixtures remain a smoke test; see
       [`evals/session-11-report.md`](evals/session-11-report.md))
-- [ ] 12. 20 tasks, baseline comparison report
-- [ ] 13. FastAPI, isolated workspace per run
-- [ ] 14. Persistent memory: resume by default + a memory file outside the workspace
-- [ ] 15. Docker, docs, demo
+- [x] 12. 20 tasks, baseline comparison report (registered change did not ship)
+- [x] 13. Safe creation of new files in the selected workspace
+- [ ] 14. Workspace-aware resume and persistent memory (week-long poisoning audit remains)
+- [x] 15. Docker, docs, and a local-project demo (fresh container verified)
 
 ## Evaluation suite
 
@@ -217,7 +297,7 @@ result files are never overwritten. Negative controls (`noop`, `wrong_file`,
 
 [`docs/post-session-15-roadmap.md`](docs/post-session-15-roadmap.md) sketches
 where this goes once the course is finished: a local-first `mini-agent` you
-install and run from any project directory, with file creation, patching,
+install and run from any project directory, with patching,
 and controlled command execution. **Everything in it is PLANNED — NOT
 IMPLEMENTED**, and nothing starts until all 15 sessions are done. The
 15-session plan remains the only active work.
@@ -226,6 +306,33 @@ IMPLEMENTED**, and nothing starts until all 15 sessions are done. The
 
 Kept in `notes/` — one entry per session: goal, what I implemented, the failure
 I triggered, expected vs observed, what I learned, open questions, next step.
+
+### Sessions 13–15
+
+Session 13 added create-only `write_file` for UTF-8 text files in the selected
+workspace. It refuses existing files and missing parent directories, caps
+content at 64 KB, and records interrupted creates for safe replay. See the
+[Session 13 plan](docs/session-13.md). Session 14 verifies workspace-aware
+resume and memory; Session 15 validates the local workflow in a fresh
+environment. Workspace path checks and Docker are not security sandboxes.
+
+Chat reads optional human-maintained notes from `MINI_AGENT_MEMORY_DIR` (by
+default `.runtime/memory`), keyed by workspace. The path and hash appear at
+startup; edit or delete the text file by hand. `python -m agent.chat
+--continue` selects the latest journal for the current workspace.
+To save a fact, use `/remember <exact user statement>` followed by
+`/approve-memory`; `/cancel-memory` discards the proposal. Only an exact
+single-line message previously supplied by the user is accepted. The saved
+note is read at the start of a new session.
+
+A container image and offline demo are available through `Dockerfile`
+and `python scripts/demo.py`. The offline demo has run in the image as a
+non-root user. The container suite passed 656 tests with two Git history checks
+skipped because the image contains no Git checkout. A controlled interrupted
+edit resumed in a replacement container with mounted workspace and journal;
+the already-applied edit was detected and not repeated. Run
+`python scripts/memory_eval.py --memory-file NOTES --output RESULTS` for the
+offline paired memory check; it verifies plumbing, not live model quality.
 
 ### Session 12: paired comparisons
 
@@ -240,14 +347,14 @@ suite and preserve completed rows. Existing CLI defaults remain unchanged.
 ```bash
 # Freeze decisions, fixture hashes, configured budgets and historical usage.
 python -m evals.register --baseline evals/results/session-11-live-three.jsonl \
-  --output evals/results/session-12-protocol.json
+  --output evals/results/session-12-protocol-v2.json
 # Commit that protocol before live execution. Run offline first.
-python -m evals.compare --protocol evals/results/session-12-protocol.json \
+python -m evals.compare --protocol evals/results/session-12-protocol-v2.json \
   --mode golden --output /tmp/session-12-offline.jsonl
-python -m evals.compare --protocol evals/results/session-12-protocol.json \
-  --mode live --output evals/results/session-12-live.jsonl
+python -m evals.compare --protocol evals/results/session-12-protocol-v2.json \
+  --mode live --output evals/results/session-12-live-complete.jsonl
 # Regenerates every comparison statistic and decision from durable rows alone.
-python -m evals.compare --report evals/results/session-12-live.jsonl
+python -m evals.compare --report evals/results/session-12-live-complete.jsonl
 ```
 
 The registered rule requires at least 10 percentage points of success gain,

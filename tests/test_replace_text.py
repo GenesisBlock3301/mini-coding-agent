@@ -277,6 +277,9 @@ def test_policy_py_was_not_modified_this_session():
     If a WRITE needed one new line in policy.py, Session 2's boundary was in
     the wrong place.
     """
+    import shutil
+    if not shutil.which("git"):
+        pytest.skip("Git history is unavailable in a source-only image")
     diff = subprocess.run(
         ["git", "diff", "HEAD", "--", "agent/policy.py"],
         capture_output=True,

@@ -424,7 +424,7 @@ and only the second one can cost a user their file.
   input tokens for one answer, and the budget only learns about the ones that
   returned.
 - **Backoff cannot fix a rate limit you are causing.** One process backing off is
-  polite; Session 13's concurrent runs will need a shared limiter, which is a
+  polite; concurrent local runs may need a shared limiter, which is a
   different mechanism entirely.
 - **Failpoints rehearse the deaths you thought of.** `os._exit` models a SIGKILL
   well. It does not model a disk that accepts a write and loses it, a clock that

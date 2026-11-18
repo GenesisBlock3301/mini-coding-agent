@@ -252,7 +252,8 @@ def test_code_fingerprint_changes_with_local_code_even_at_same_sha(monkeypatch, 
     source.write_text('x=2\n')
     new = run.code_version()
     assert new['digest'] != old['digest']
-    assert first['sha']
+    # A source-only container has no Git executable or checkout metadata.
+    assert first['sha'] is None or len(first['sha']) == 40
 
 
 def test_result_file_is_not_overwritten(tmp_path):

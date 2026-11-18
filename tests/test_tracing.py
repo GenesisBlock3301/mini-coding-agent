@@ -98,7 +98,7 @@ def test_the_journal_now_records_latency_model_and_the_tool_menu(workspace, runs
     assert result_record["duration_ms"] == pytest.approx(77.7)
     assert result_record["model"] == "scripted-7b"
     assert result_record["tools"]["names"] == [
-        "list_files", "list_folders", "read_file", "replace_text",
+        "list_files", "list_folders", "read_file", "replace_text", "write_file",
     ]
     assert len(result_record["tools"]["digest"]) == 12
 

@@ -1,6 +1,6 @@
 """Tool schemas and implementations. (Session 2+)
 
-list_files, read_file, replace_text. Each returns a structured result —
+list_files, read_file, replace_text, write_file. Each returns a structured result —
 including structured errors the model can act on.
 """
 
@@ -79,6 +79,7 @@ MAX_BYTES = 8_000
 # kinds of output: 8KB of names is a lot of names, 8KB of source is half a
 # module. One constant serving both would be a coincidence, not a design.
 MAX_READ_BYTES = 64_000
+MAX_CREATE_BYTES = MAX_READ_BYTES
 
 EMPTY_FILE = "(empty file)"
 
@@ -850,6 +851,73 @@ def replace_text(
     )
 
 
+def write_file(path: str, content: str, *, root: Path) -> ToolResult:
+    """Create one UTF-8 file atomically, without replacing an existing path."""
+    if len(content) > MAX_CREATE_BYTES:
+        return _tool_error(
+            "too_large_to_create",
+            f"write_file content exceeds the {MAX_CREATE_BYTES}-byte limit.",
+        )
+    try:
+        data = content.encode("utf-8")
+    except UnicodeEncodeError:
+        return _tool_error("invalid_arguments", "write_file needs valid UTF-8 text.")
+    if b"\0" in data:
+        return _tool_error("invalid_arguments", "write_file cannot create binary content containing null bytes.")
+    if len(data) > MAX_CREATE_BYTES:
+        return _tool_error(
+            "too_large_to_create",
+            f"write_file content exceeds the {MAX_CREATE_BYTES}-byte limit.",
+        )
+    try:
+        target = resolve_in_workspace(path, root=root)
+    except PolicyViolation as violation:
+        return _rejected(violation)
+
+    # This is only an early, helpful refusal. os.link below is the atomic
+    # no-clobber check if another process creates the name in the meantime.
+    if target.exists() or target.is_symlink():
+        return _tool_error("already_exists", f"{echo_path(path)} already exists; write_file only creates new files.")
+    if not target.parent.is_dir():
+        return _tool_error("parent_not_found", f"{echo_path(path)} has no existing parent directory in the workspace.")
+
+    tmp_path: str | None = None
+    published = False
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix=EDIT_TMP_PREFIX, dir=target.parent)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # A hard link publishes the fully written inode only when target is
+        # absent. os.replace would overwrite a file created after our check.
+        os.link(tmp_path, target)
+        published = True
+        _sync_directory(target.parent)
+    except FileExistsError:
+        return _tool_error("already_exists", f"{echo_path(path)} already exists; write_file did not replace it.")
+    except FileNotFoundError:
+        return _tool_error("parent_not_found", f"{echo_path(path)} has no existing parent directory in the workspace.")
+    except PermissionError:
+        return _tool_error("permission_denied", f"{echo_path(path)} could not be created because permission was denied.")
+    except OSError as exc:
+        return _tool_error("write_failed", f"{echo_path(path)} could not be created ({type(exc).__name__}).")
+    finally:
+        if tmp_path is not None:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    if not published:  # pragma: no cover - all failed paths return above
+        raise AssertionError("write_file finished without publishing")
+    shown = str(target.relative_to(Path(root).resolve()))
+    return ToolResult(
+        ok=True,
+        content=f"{echo_path(path)}: created a new {len(data)}-byte file.",
+        changed_path=shown,
+    )
+
+
 # --------------------------------------------------------------------------
 # The menu the model sees, and the table the dispatcher uses.
 #
@@ -969,6 +1037,26 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": (
+                "Create one new UTF-8 text file inside the workspace. "
+                "Refuses an existing file and does not create parent directories. "
+                "Use replace_text to edit an existing file."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Workspace-relative new file, e.g. 'src/new.py'"},
+                    "content": {"type": "string", "description": "Complete UTF-8 text for the new file"},
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 TOOLS = {
@@ -976,6 +1064,7 @@ TOOLS = {
     "list_folders": list_folders,
     "read_file": read_file,
     "replace_text": replace_text,
+    "write_file": write_file,
 }
 
 # Session 8, D73. Which of those tools can change the workspace.
@@ -989,7 +1078,7 @@ TOOLS = {
 # because agent/replay.py identifies the file at risk by that argument and a
 # writer named any other way would be fingerprinted as `no-path` - which
 # reads as "nothing to protect" and is exactly the silent wrong answer.
-WRITES = frozenset({"replace_text"})
+WRITES = frozenset({"replace_text", "write_file"})
 
 
 # --------------------------------------------------------------------------

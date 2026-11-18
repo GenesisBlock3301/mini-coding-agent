@@ -12,12 +12,12 @@
 runs from any project directory:
 
 ```bash
-cd ~/Projects/my-fastapi-app
+cd ~/Projects/my-python-app
 mini-agent
 ```
 
 ```text
-You: Create a FastAPI authentication module.
+You: Fix the authentication module.
 
 Agent: Inspecting project structure...
 Agent: Creating auth.py...
@@ -60,7 +60,7 @@ missing is mostly the parts that make mistakes expensive.
 | Disposable fixture workspaces + an independent verifier | `scripts/fixture.py`, `fixtures/` (S7) | every milestone's tests |
 | Fault injection across crash points, graded by the verifier | `scripts/fault_matrix.py` (S8) | M4–M7 |
 | Rule auditing against recorded journals | `scripts/repeat_audit.py` (S9) | M8 |
-| *(S10–S15, not yet built)* traces, eval suite, FastAPI, memory, Docker | — | M9, M12, M13 |
+| *(S10–S15)* traces, eval suite, local interaction, memory, Docker | — | M9–M11 |
 
 **The invariants this roadmap may not break.** They were each paid for with a
 session and they are the acceptance criteria behind every milestone below.
@@ -86,7 +86,7 @@ session and they are the acceptance criteria behind every milestone below.
 | Workspace defaults to `<project>/playground`, anchored to the repo | `policy.DEFAULT_WORKSPACE` | M1 |
 | `runs/` is a directory inside this repository | `cli.RUNS_DIR` | M1, M2 |
 | **`--resume` does not read the workspace back from the journal** | `cli._open_resumed_run` takes `root` from the flag/default, while `run_started` has recorded `workspace` since S7 (D62) | M2 |
-| No file creation, deletion, rename, or multi-file edit | `WRITES == {"replace_text"}` | M4–M6 |
+| No whole-file replacement, deletion, rename, or multi-file edit | Session 13 adds create-only `write_file` | M4–M6 |
 | No command execution of any kind | — | M7 |
 | No approval or consent mechanism; every tool runs unattended | — | M3, M6, M7 |
 | No ignore rules; `list_files` caps at 200 entries / 8KB | `tools.MAX_ENTRIES` | M1 |
@@ -119,7 +119,7 @@ need a different mechanism entirely, which is an unresolved decision below.
    are data, never instructions — is enforced today by the fact that the worst
    a file can talk the model into is reading or editing another file inside the
    workspace. After M7, a `README.md` saying "run `curl … | sh`" is one
-   approval click from succeeding, and after M12 (memory) a single injection
+   approval click from succeeding, and after S14's memory a single injection
    can persist across sessions.
 3. **The workspace becomes the user's real code.** Every fixture to date is
    disposable. From M1 the agent edits work that is not reproducible by
@@ -160,8 +160,8 @@ the tests that prove it.
 **Goal.** `cd ~/any/project && python -m agent.cli --tools "…"` operates on the
 current working directory, with the boundary guarantees intact.
 
-**Prerequisites.** Sessions 1–15 complete. S13's per-run workspace isolation is
-the design this generalises.
+**Prerequisites.** Sessions 1–15 complete. Session 14's workspace-aware
+recovery is the design this generalises.
 
 **Decisions to lock.**
 
@@ -243,7 +243,7 @@ case that the file tools never adopt.
 | R7 | What needs approval | nothing / every write / writes outside a per-run allowlist / by tool class |
 | R8 | Granularity of "yes" | per call / per tool for this run / per path prefix / remembered across runs |
 | R9 | What a refusal is | a `ToolResult` the model can work around / a hard stop with its own stop reason |
-| R10 | Non-interactive runs (evals, CI, S13's server) | auto-deny / auto-approve with a flag / refuse to start |
+| R10 | Non-interactive runs (evals, CI, one-shot CLI) | auto-deny / auto-approve with a flag / refuse to start |
 
 **Acceptance criteria.**
 - A refused call is still *answered* (S5's invariant) and the run continues or
@@ -270,36 +270,34 @@ a scripted non-interactive run proving no prompt can block it.
 > tool below owes its own answer to "what does the journal say, and what does
 > the disk say, after a crash in the middle".
 
-#### M4 — `write_file`
+#### M4 — Whole-file replacement
 **PLANNED — NOT IMPLEMENTED**
 
-**Goal.** Create a new file, or replace one wholesale, atomically.
+**Goal.** Extend Session 13's create-only `write_file` with an explicit,
+atomic replacement operation for an existing file.
 
-**Prerequisites.** M1, M3.
+**Prerequisites.** Session 13, M1, M3.
 
-**The crash question.** `replace_text` can tell "already applied" from "never
-ran" because the anchor is gone in one case and present in the other.
-`write_file` cannot: the fingerprint of a file that did not exist is `ABSENT`
-(S8 already has the value), and after a crash the file either exists with the
-new content or does not. That is *answerable* — but only if the intent records
-the `ABSENT` fingerprint, and only if "create" and "overwrite" are different
-operations with different refusals (R11: separate tools, a `mode` argument, or
-an `overwrite: false` default).
+**The crash question.** Session 13 handles the `ABSENT` precondition for a new
+file. Replacing an existing file requires an expected content hash: after a
+crash, the journal and disk must distinguish the old file, the intended new
+file, and an unrelated user edit. R11 decides whether replacement is a
+separate tool or an explicit mode. It must never become the default behavior
+of the create-only tool.
 
 **Acceptance criteria.**
 - Temp-file-plus-`os.replace` within the same directory; no partial file is
   ever visible, and nothing is written outside the workspace.
-- Overwriting an existing file without saying so is refused by default (R11).
+- Replacement requires an explicit mode and a matching precondition (R11).
 - A crash between intent and outcome leaves the file entirely old or entirely
-  new, proven by the fault matrix, and `--resume` never recreates a file the
-  user deleted in between.
+  new, proven by the fault matrix; `--resume` never overwrites a later user edit.
 - Parent directories: created implicitly or refused, decided and written down
   (R12). Implicit creation means a typo'd path silently makes a tree.
 
-**Required tests.** `fault_matrix.py` extended with `write_file` cases at all
-four crash points; create-over-existing; create where a *directory* has that
-name; path-boundary suite re-run for the new tool; a journal-replay test
-proving the `ABSENT` fingerprint distinguishes the two worlds.
+**Required tests.** `fault_matrix.py` extended with replacement cases at all
+four crash points; stale hash refusal; missing target; replacement where a
+*directory* has that name; path-boundary suite re-run for replacement; a
+journal-replay test distinguishing the intended bytes from a later user edit.
 
 ---
 
@@ -525,25 +523,6 @@ a recorded-response replay per provider so the suite stays offline.
 
 ---
 
-### Phase 5 — Optional future extensions
-
-#### M12–M14 — Gateway, hosted execution, multi-user
-**PLANNED — NOT IMPLEMENTED — NOT RECOMMENDED YET**
-
-Managed model gateway, authentication and quotas, cloud execution, remote
-workspaces, multi-user orchestration, billing.
-
-**Prerequisites.** A stable local CLI with M1–M11 complete and an eval suite
-that has caught at least one real regression. Nothing here is a learning
-objective of this project, and each item converts a local reliability problem
-into a distributed one. S13's FastAPI interface is the only piece of this that
-the original plan asks for, and it exists to teach per-run isolation rather
-than to be deployed.
-
-The engineering principle that applies: **no premature cloud infrastructure.**
-
----
-
 ## 4. Recommended implementation order after Session 15
 
 ```
@@ -551,7 +530,7 @@ M1  workspace from cwd          ──┐
 M2  resume keeps its workspace    │  Phase 1: make it portable before
 M3  approval mechanism          ──┘  anything can do more damage
 
-M4  write_file                  ──┐
+M4  whole-file replacement      ──┐
 M5  apply_patch / multi-file      │  Phase 2: each with its own crash story
 M6  delete / rename             ──┘
 
@@ -561,15 +540,13 @@ M8  verification as an outcome  ──┘
 M9  long sessions / compaction  ──┐
 M10 installable package           │  Phase 4: make it pleasant
 M11 providers                   ──┘
-
-M12+ anything hosted               Phase 5: not yet, and probably not here
 ```
 
 Three ordering claims worth defending:
 
-1. **M3 before M4.** Approval built while `replace_text` is the only writer
-   gets one shape. Built after `run_command` it gets two, and the file tools
-   never adopt the second.
+1. **M3 before M4.** Approval built while the writers are `replace_text` and
+   create-only `write_file` can use one shape. Built after `run_command` it
+   risks a second shape that file tools never adopt.
 2. **M2 immediately after M1.** The resume/workspace mismatch is latent today
    and becomes a data-loss bug the moment the workspace is real.
 3. **M7 after all of Phase 2.** Command execution is the only milestone that

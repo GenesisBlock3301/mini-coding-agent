@@ -6,18 +6,17 @@ Codex shape.
 the history instead of met with a question; and the conversation's cost is capped
 across the whole session, not per question.
 
-**This is not a plan milestone.** None of the 14 sessions build it. Session 9 handles
-the problem a long conversation *creates* (context growth) and Session 13 builds a
-server for a different reason entirely (concurrent callers, isolated workspaces). The
-interactive loop itself was never on the list.
+**This began outside the original plan.** Session 9 handles the problem a long
+conversation *creates* (context growth). Session 13 now develops the local
+interactive workflow, workspace selection, and recovery.
 
 It is worth ~90 minutes anyway, because sessions 7 through 9 are exploration work —
 run a task, look at what the model did, adjust, run again — and a live session is a
 far better instrument for that than relaunching a process per question.
 
-**No FastAPI.** Claude Code and Codex are long-lived local processes holding history
-in RAM; the only HTTP they speak is outbound to the model API. A web framework earns
-its place when a second caller exists. Today there is one: your terminal.
+Claude Code and Codex are long-lived local processes holding history in RAM.
+This agent follows that terminal workflow. It uses outbound requests to model
+providers, but does not expose an HTTP service.
 
 ---
 
@@ -210,11 +209,11 @@ exactly as `cli.py` calls them.
   the whole response. Streaming complicates usage accounting (totals arrive in a final
   event) and tool-call assembly (arguments arrive as fragments — that is what the
   `"index": 0` in your journal's tool calls is for). Not now.
-- **FastAPI.** See the top of this file.
 - **Compaction / summarisation.** The plan is explicit: a summary can lose file
   details, instructions, and tool-call relationships. Measure first, cap second,
   summarise much later if ever.
-- **Concurrent sessions.** One process, one conversation. That is Session 13.
+- **Concurrent sessions.** One process, one conversation. Independent local
+  runs need separate journals and histories.
 
 ---
 

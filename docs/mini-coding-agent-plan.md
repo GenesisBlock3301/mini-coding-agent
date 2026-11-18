@@ -8,7 +8,7 @@ This is a learning project. Prioritize understanding over adding features.
 
 **Time:** 15 sessions of approximately 1.5–2 hours each. Continue unfinished milestones in the next session rather than rushing.
 
-**Stack:** Python, DeepSeek API, pytest; FastAPI and Docker in the final stage. Start without an agent framework so the loop and message handling remain visible.
+**Stack:** Python, DeepSeek API, pytest and Docker. The product is a local terminal coding assistant. Start without an agent framework so the loop and message handling remain visible.
 
 ## 1. Define the Scope
 
@@ -67,9 +67,9 @@ Keep the API key in an environment variable. Keep secrets, real projects, and th
 | 10      | Add JSONL event traces.                                                               | You can inspect requests, tool calls, results, usage, and stop reasons after a run. |
 | 11      | Create 10 evaluation tasks with fresh fixtures.                                       | A script verifies the expected outcomes.                                            |
 | 12      | Expand to 20 tasks and compare one improvement against a baseline.                    | Produce a report covering success, latency, usage, and unexpected changes.          |
-| 13      | Expose the loop through FastAPI with a separate workspace per run.                    | Concurrent runs do not share files or conversation history.                         |
-| 14      | Persistent memory: resume by default, and facts that outlive one conversation.        | A new session starts from the last one; a stated fact survives a restart; a wrong memory can be found and deleted by hand. |
-| 15      | Add Docker, documentation, and a demo.                                                | The documented setup works in a fresh environment.                                  |
+| 13      | Add safe creation of new text files in the selected local workspace.                  | A new file is created atomically; existing files and outside paths stay unchanged; interrupted writes recover safely. |
+| 14      | Validate workspace-aware resume and persistent memory.                                | A resumed session uses its recorded workspace; a stated fact survives a restart; a wrong memory can be deleted by hand. |
+| 15      | Add Docker, documentation, and a local-project demo.                                  | The documented setup works in a fresh environment, and a user can inspect changes and recovery. |
 
 ### Limits to Implement
 
@@ -264,7 +264,7 @@ Before adding editing, verify that you can explain:
 - Persistent memory: sessions resume by default, and a hand-inspectable memory file outside the writable workspace.
 - A 20-task evaluation suite and baseline comparison report.
 - Observable run traces with secrets excluded.
-- A FastAPI interface with isolated run state.
+- Safe creation of new text files in a selected local workspace, with isolated run state.
 - A Docker setup and reproducible README.
 - A short demo showing a successful task, a controlled failure, and the evaluation results.
 

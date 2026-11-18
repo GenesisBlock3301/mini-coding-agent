@@ -11,7 +11,7 @@ logic - the loop lives in agent/loop.py.
 Can also be run straight from an IDE with no arguments: it then falls back to
 the DEBUG_TASK preset at the bottom of this file.
 
-With --tools the model is offered list_files and read_file and the loop runs:
+With --tools the model is offered the file tools and the loop runs:
 tool call -> execution -> tool result -> model, until the model answers
 without asking for a tool, or max_steps model calls have been made.
 
@@ -60,7 +60,7 @@ from agent.journal import (
 )
 from agent.loop import LoopResult, run_loop
 from agent.model import ModelConfig, ModelError, ModelResponse, active_provider, context_warning
-from agent.storage import JOURNALS_DIR, workspace_root
+from agent.storage import JOURNALS_DIR, workspace_root, recorded_workspace
 from agent.replay import plans_for
 from agent.retry import REASON_TEXT, RetryPolicy
 from agent.tools import TOOL_SCHEMAS, ToolResult
@@ -106,8 +106,8 @@ SYSTEM_PROMPT = "You are a terse assistant."
 # presents 200 of 5000 names as the answer is worse than one that refused -
 # the user cannot see the cap, only the list.
 TOOLS_SYSTEM_PROMPT = (
-    "You are a terse coding assistant with four tools: list_files, "
-    "list_folders, read_file and replace_text. All paths are relative to a "
+    "You are a terse coding assistant with five tools: list_files, "
+    "list_folders, read_file, replace_text and write_file. All paths are relative to a "
     "workspace root - never absolute, never outside it. Call a tool when the "
     "answer depends on what is actually on disk. "
     "When the user names a file or folder, treat that name as a "
@@ -117,6 +117,7 @@ TOOLS_SYSTEM_PROMPT = (
     "Always read a file before you edit it, and copy the text for 'old' "
     "verbatim from what read_file showed you, including indentation. "
     "Make one change per replace_text call. "
+    "Use write_file only to create a new file; it never overwrites an existing file. "
     "\"All files\", \"every file\" or \"the files\" with no directory named "
     "means files ANYWHERE in the workspace, not only the root one. Answer "
     "those by calling list_folders, then list_files on every subdirectory it "
@@ -725,7 +726,21 @@ def main(argv: list[str]) -> int:
     # Resolved once, before anything is spent. A workspace that does not
     # exist is not a boundary problem - every path inside it would come back
     # not_found, which reads as a broken agent rather than a mistyped flag.
-    root = workspace_root(options.workspace)
+    if options.resume_run_id:
+        try:
+            recorded = recorded_workspace(RUNS_DIR, options.resume_run_id)
+        except FileNotFoundError as err:
+            print(f"error [no_journal]: {err}", file=sys.stderr)
+            return EXIT_USAGE
+        except (JournalCorrupt, ValueError, OSError) as err:
+            print(f"error [resume]: {err}", file=sys.stderr)
+            return EXIT_USAGE
+        if options.workspace is not None and workspace_root(options.workspace) != recorded:
+            print("error [workspace]: --workspace conflicts with the journal", file=sys.stderr)
+            return EXIT_USAGE
+        root = recorded
+    else:
+        root = workspace_root(options.workspace)
     if not root.is_dir():
         print(
             f"error [usage]: workspace {root} does not exist or is not a "

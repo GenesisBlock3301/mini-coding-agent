@@ -1,0 +1,12 @@
+.git
+.env
+.venv
+.runtime
+.local-state
+playground
+playground-evil
+__pycache__
+**/__pycache__
+.pytest_cache
+*.pyc
+*.jsonl

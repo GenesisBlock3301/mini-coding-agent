@@ -69,7 +69,7 @@ in `agent/policy.py` already accepts an override and already honours a `WORKSPAC
 environment variable — the plumbing exists and the CLI simply has no flag for it. So
 the decision is not "can I" but "does a run get its own copy, starting now". Say no
 and every run reads the previous run's output; say yes and you have built, two
-sessions early, the per-run workspace that Session 13 needs for concurrent runs. The
+sessions early, the per-run workspace that local independent runs need. The
 cost of saying yes is a flag and a temp directory. The cost of saying no is that
 every number you write down for the rest of the course is contaminated by run order.
 

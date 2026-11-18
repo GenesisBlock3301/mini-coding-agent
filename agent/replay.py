@@ -49,7 +49,7 @@ from typing import Any
 
 from agent.journal import ResumeState
 from agent.policy import PolicyViolation, resolve_in_workspace
-from agent.tools import WRITES
+from agent.tools import MAX_CREATE_BYTES, WRITES
 
 # The three verdicts. Only REPLAY re-enters the tool.
 REPLAY = "replay"
@@ -102,6 +102,25 @@ def _path_argument(arguments: Any) -> str | None:
         return None
     path = parsed.get("path")
     return path if isinstance(path, str) else None
+
+
+def _created_digest(arguments: Any) -> str | None:
+    """Expected bytes of a create-only write, from its recorded arguments."""
+    if not isinstance(arguments, str):
+        return None
+    try:
+        parsed = json.loads(arguments or "{}")
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("content"), str):
+        return None
+    try:
+        data = parsed["content"].encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if b"\0" in data or len(data) > MAX_CREATE_BYTES:
+        return None
+    return digest(data)
 
 
 def before_fingerprint(name: str, arguments: Any, *, root: Path) -> str | None:
@@ -158,11 +177,24 @@ class ReplayPlan:
         only "interrupted" asks again; a model told "read the file" reads it.
         """
         if self.verdict == CHANGED:
+            if self.name == "write_file":
+                return (
+                    f"This create call was interrupted, but {self.where} now "
+                    "contains the exact intended bytes. It was treated as "
+                    "applied and was NOT repeated. Nothing was written just now."
+                )
             return (
                 f"This call was interrupted by a crash, and {self.where} has "
                 "changed since it started: the edit is treated as applied and "
                 "was NOT repeated. Nothing was written just now. Read the file "
                 "if you need to confirm what it contains before continuing."
+            )
+        if self.name == "write_file" and self.before is not None:
+            return (
+                f"This create call was interrupted, and {self.where} no longer "
+                "matches its recorded starting state or intended content. "
+                "Nothing was written just now. Inspect the file before deciding "
+                "whether to try again."
             )
         return (
             f"This call was interrupted by a crash and cannot be repeated "
@@ -203,7 +235,16 @@ def decide(intent: dict[str, Any], *, root: Path) -> ReplayPlan:
         if before not in (NO_PATH, OUTSIDE)
         else before
     )
-    verdict = REPLAY if now == before else CHANGED
+    if name == "write_file":
+        expected = _created_digest(arguments)
+        if now == before:
+            verdict = REPLAY
+        elif before == ABSENT and expected is not None and now == expected:
+            verdict = CHANGED
+        else:
+            verdict = UNKNOWN
+    else:
+        verdict = REPLAY if now == before else CHANGED
     return ReplayPlan(verdict, call_id, name, path, before, now)
 
 

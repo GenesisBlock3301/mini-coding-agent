@@ -130,6 +130,24 @@ def test_history_carries_across_turns(capsys):
     assert capsys.readouterr().out.split() == ["one", "two", "three"]
 
 
+def test_chat_can_create_a_new_file(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv("WORKSPACE_DIR", str(workspace))
+    create = ModelResponse(
+        text=None, model="scripted", finish_reason="tool_calls",
+        prompt_tokens=100, completion_tokens=10, total_tokens=110,
+        duration_ms=0.0,
+        tool_calls=[{
+            "id": "create_1", "type": "function",
+            "function": {"name": "write_file", "arguments": json.dumps({"path": "new.txt", "content": "created in chat\n"})},
+        }],
+        prompt_cache_hit_tokens=0, prompt_cache_miss_tokens=100,
+    )
+    assert main([], model_fn=ScriptedModel(create, says("done")), read_line=lines("create new.txt")) == 0
+    assert (workspace / "new.txt").read_text() == "created in chat\n"
+
+
 def test_one_journal_holds_every_turn(tmp_path):
     model = ScriptedModel(says("one"), says("two"))
     main([], model_fn=model, read_line=lines("a", "b"))
@@ -595,7 +613,7 @@ def test_the_menu_offers_every_command_and_narrows_as_you_type():
 
     assert _menu("/") == [f"/{c.name}" for c in COMMANDS]
     assert _menu("/st") == ["/status"]
-    assert _menu(":c") == [":cost"]
+    assert _menu(":c") == [":cost", ":cancel-memory"]
     assert _menu("/STA") == ["/status"]
 
 
@@ -684,7 +702,7 @@ def test_a_bare_prefix_prints_the_list_instead_of_asking_the_model(capsys):
 
     assert model.seen == []
     err = capsys.readouterr().err
-    assert err.count("/status   current session metrics") == 3   # banner + 2
+    assert err.count("current session metrics") == 3   # banner + 2
 
 
 def test_an_unknown_command_prints_the_list_not_a_pointer_to_it(capsys):

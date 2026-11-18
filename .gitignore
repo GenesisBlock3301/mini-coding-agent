@@ -8,10 +8,13 @@ __pycache__/
 
 # Run artifacts
 .runtime/
+.local-state/
 evals/results/*
 !evals/results/.gitkeep
+!evals/results/session-12-live-complete.jsonl
 traces/
 *.jsonl
+!evals/results/session-14-memory-paired.jsonl
 
 # Session 2 fixtures - regenerate with scripts/make_fixtures.py.
 # Never commit: contains symlinks pointing outside the repo.

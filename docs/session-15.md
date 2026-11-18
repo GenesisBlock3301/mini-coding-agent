@@ -1,7 +1,13 @@
 # Session 15 — It Works on My Machine, and Other Things That Are Not True
 
-**Goal (from the plan):** add Docker, documentation, and a demo.
-**Done when:** the documented setup works in a fresh environment.
+**Goal (from the plan):** add Docker, documentation, and a local-project demo.
+**Done when:** the documented setup works in a fresh environment and a user can
+inspect changes and recovery in the local terminal workflow.
+
+The demo must show workspace selection, the provider and budget banner, the
+journal location, changed paths, and an incomplete run followed by recovery.
+Verify the resulting files independently of the agent's explanation. Document
+when to use a disposable fixture before trying the workflow on real code.
 
 Every criterion before this one could be checked by running something. This one
 can only be checked by *someone else* running something, and the whole session
@@ -46,17 +52,17 @@ What it does not have, and what will break first in a fresh environment:
 
 | #    | Decision                                      | Options                                                                          | My pick + why |
 |------|-----------------------------------------------|-----------------------------------------------------------------------------------|---------------|
-| D147 | Base image                                    | `python:3.12-slim` / `-alpine` / a distro base                                     |               |
-| D148 | What is in the image                          | code only, state mounted / code plus fixtures / everything, state in a named volume |               |
-| D149 | User                                          | root / a non-root user, and who owns the mounted workspace                          |               |
-| D150 | How the key arrives                           | `-e DEEPSEEK_API_KEY` / `--env-file` / a mounted secret / never, local provider only |               |
-| D151 | The entrypoint                                | the CLI / the Session 13 server / a command argument that selects                   |               |
-| D152 | Ollama from a container                       | documented host networking / unsupported in the image / a compose file with both    |               |
-| D153 | How "fresh environment" is proved             | a clean container / a second machine / CI that builds from a clean checkout         |               |
-| D154 | Dependency pinning                            | exact `==` / ranges / a lockfile with hashes                                        |               |
-| D155 | The demo's form                               | one script / a README walkthrough / a recording                                     |               |
-| D156 | Whether the demo spends money                 | fully scripted and free / one live task / both, selected by a flag                  |               |
-| D157 | What the README promises                      | a learning project / a usable tool / a tool with a stated threat model              |               |
+| D147 | Base image                                    | `python:3.12-slim` / `-alpine` / a distro base                                     | **`python:3.12-slim`.** |
+| D148 | What is in the image                          | code only, state mounted / code plus fixtures / everything, state in a named volume | **Code, fixture templates, tests and report; all generated state mounted.** |
+| D149 | User                                          | root / a non-root user, and who owns the mounted workspace                          | **UID 10001 by default; host UID/GID override for Linux bind mounts.** |
+| D150 | How the key arrives                           | `-e DEEPSEEK_API_KEY` / `--env-file` / a mounted secret / never, local provider only | **Runtime environment file**, never an image layer. The actual name is `DEEPSEEK_APIKEY`. |
+| D151 | The entrypoint                                | local CLI / interactive chat / a command argument that selects                      | **`agent.cli` entrypoint**; override with `python -m agent.chat`. |
+| D152 | Ollama from a container                       | documented host networking / unsupported in the image / a compose file with both    | **Document `host.docker.internal`** and the context-length setting. |
+| D153 | How "fresh environment" is proved             | a clean container / a second machine / CI that builds from a clean checkout         | **No-cache image build and runtime tests**, with no host env or cache. No second-machine test. |
+| D154 | Dependency pinning                            | exact `==` / ranges / a lockfile with hashes                                        | **Exact direct pins** in `requirements.txt`; transitive dependencies remain unpinned. |
+| D155 | The demo's form                               | one script / a README walkthrough / a recording                                     | **One script plus README commands.** |
+| D156 | Whether the demo spends money                 | fully scripted and free / one live task / both, selected by a flag                  | **Scripted and free by default; `--live` opts in.** |
+| D157 | What the README promises                      | a learning project / a usable tool / a tool with a stated threat model              | **Learning project with explicit threat model and limits.** |
 
 **Hardest two: D148 and D157.**
 
@@ -91,14 +97,14 @@ you did not re-read.
 
 ### Phase 0 — Separate state from code
 
-- [ ] **Step 1 — Name the four categories.**
+- [x] **Step 1 — Name the four categories.**
   - Build: nothing. For every directory in the repo, write down whether it is
     code, read-only input, durable state, or disposable state.
   - Test: the list covers `agent/`, `scripts/`, `tests/`, `fixtures/`, `evals/`,
     `runs/`, `runs/workspaces/`, `playground/`, `.env`, and Session 14's memory.
   - Review: anything you cannot classify is a thing that will be mounted wrong.
 
-- [ ] **Step 2 — Make the locations configurable.**
+- [x] **Step 2 — Make the locations configurable.**
   - Build: `RUNS_DIR`, the workspace root and the memory path all come from
     configuration with today's values as defaults.
   - Test: the whole suite passes with all three pointed somewhere else.
@@ -107,7 +113,7 @@ you did not re-read.
 
 ### Phase 1 — The image
 
-- [ ] **Step 3 — Build it, small and non-root.**
+- [x] **Step 3 — Build it, small and non-root.**
   - Build: D147, D148, D149. A `.dockerignore` written *before* the
     `Dockerfile`, excluding `.env`, `runs/`, `playground/`, `.venv`,
     `__pycache__` and `.pytest_cache`.
@@ -116,7 +122,7 @@ you did not re-read.
   - Review: a secret that was ever in a layer is in the image forever, even if a
     later layer deletes it.
 
-- [ ] **Step 4 — Mount the state.**
+- [x] **Step 4 — Mount the state.**
   - Build: D148. A volume for `runs/`, a volume or bind for the workspace, a
     read-only mount for memory if Session 14 built it.
   - Test: run a task, kill the container, start a new one, `--resume` the run.
@@ -125,7 +131,7 @@ you did not re-read.
     container cannot resume, the durability from Sessions 5 to 8 stops at the
     container boundary.
 
-- [ ] **Step 5 — Permissions, which is where this always goes wrong.**
+- [x] **Step 5 — Permissions, which is where this always goes wrong.**
   - Test: a bind-mounted workspace owned by the host user, written by a
     non-root container user.
   - Review: if the answer is "run as root", say which guarantee you traded and
@@ -133,7 +139,7 @@ you did not re-read.
 
 ### Phase 2 — The documentation
 
-- [ ] **Step 6 — Write for a machine that has nothing.**
+- [x] **Step 6 — Write for a machine that has nothing.**
   - Build: a quickstart that starts at `git clone` and ends at a successful
     task, naming every prerequisite, including the generated `playground/` that
     a fresh clone does not have.
@@ -142,14 +148,14 @@ you did not re-read.
   - Review: every command you had to adjust is a documentation bug, and the
     adjustment you made without noticing is the one the next person will not.
 
-- [ ] **Step 7 — Document the limits as prominently as the features.**
+- [x] **Step 7 — Document the limits as prominently as the features.**
   - Build: D157. The threat model in plain words: one directory, no command
     execution, no network for the agent, path checks are not a sandbox, the
     container bounds a mistake rather than defeating an attacker.
   - Review: the plan's sentence about Docker belongs here verbatim rather than
     softened.
 
-- [ ] **Step 8 — Record what the project actually is.**
+- [x] **Step 8 — Record what the project actually is.**
   - Build: the invariant list, the fifteen sessions' decisions, and what is
     deliberately *not* built: no command execution, no browsing, no package
     installation, no multi-agent, no compaction, no retrieval.
@@ -158,7 +164,7 @@ you did not re-read.
 
 ### Phase 3 — The demo
 
-- [ ] **Step 9 — Three acts, free by default.**
+- [x] **Step 9 — Three acts, free by default.**
   - Build: D155 and D156. *A successful task*: one fixture case end to end.
     *A controlled failure*: `crash_demo.py --edit`, which kills a real process
     mid-write and shows the resume decide correctly. *The results*: the Session
@@ -168,7 +174,7 @@ you did not re-read.
   - Review: a demo that needs a key and a working network is a demo that fails
     in front of an audience. Two thirds of this one already does not.
 
-- [ ] **Step 10 — The fresh-environment proof.**
+- [x] **Step 10 — The fresh-environment proof.**
   - Build: D153. A clean machine or a container with nothing cached: clone,
     build, run the demo, run the tests.
   - Test: the tests pass inside the image too — 460-odd of them, no key, no
@@ -179,6 +185,25 @@ you did not re-read.
 > **Review checkpoint.** Hand the README to someone who has never seen the
 > project and watch without helping. Every question they ask is a line you owe
 > the document.
+
+**Execution record, 2026-11-18.** `agent/`, `scripts/`, `tests/`, `evals/`
+code and reports, and `docs/` are source; `fixtures/` is read-only input;
+`.runtime/journals/` and workspace-scoped memory are durable state;
+`.runtime/eval-workspaces/` and `playground/` are disposable; `.env` is a
+runtime secret. The image contains only the source and read-only inputs. Its
+size was 52,238,880 bytes and it ran as UID 10001. `.dockerignore` excludes
+the secret, generated workspaces, journals and local state.
+
+A no-cache build succeeded. In the fresh image, the documented fixture setup
+and test command passed **656 tests**, with two Git-history tests skipped
+because the image has no Git checkout. The offline three-act demo passed its
+fixture verifier, named its journal and changed path, showed both crash
+positions and recovery, and printed the Session 12 report. A first container
+crashed after editing `container_recovery.txt` (exit 137); a replacement
+container using the same two bind mounts rebuilt the journal and reported the
+applied change without repeating it. On the host, both the edited file and
+journal remained owned by the host user. The image was not tested on a second
+machine and has no hash-locked transitive dependency set.
 
 ---
 
@@ -249,7 +274,7 @@ Questions for review:
 > **A trace records what was done, not a copy of what was read.** (Session 10)
 > **An eval you cannot fail on purpose is not measuring anything.** (Session 11)
 > **A comparison you did not specify in advance is a story.** (Session 12)
-> **Two runs may share a process. They may never share a directory, a budget, or a journal.** (Session 13)
+> **A resumed run uses its recorded workspace; independent runs never share a budget or journal.** (Session 14)
 > **Memory may change what the agent does. It may never change what the agent is allowed to do.** (Session 14)
 > **If it only works on the machine that built it, it does not work.** (new, proposed)
 
