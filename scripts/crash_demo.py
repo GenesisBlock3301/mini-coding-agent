@@ -51,7 +51,7 @@ from agent.cli import RUNS_DIR, TOOLS_SYSTEM_PROMPT
 from agent.journal import TOOL_INTENT, TOOL_OUTCOME, Journal, new_run_id, rebuild
 from agent.loop import run_loop
 from agent.model import ModelResponse
-from agent.policy import workspace_root
+from agent.storage import workspace_root
 from agent.replay import plans_for
 from agent.tools import TOOL_SCHEMAS, dispatch
 
@@ -62,7 +62,7 @@ load_dotenv(ROOT / ".env")
 DEFAULT_TASK = "what's in the awkward folder?"
 
 # Anywhere a run could plausibly have left a trace of itself.
-STATE_GLOBS = ("run-*.jsonl", "runs/*", ".agent-state*", "*.journal")
+STATE_GLOBS = ("run-*.jsonl", ".runtime/journals/*", ".agent-state*", "*.journal")
 
 
 def banner(text: str) -> None:

@@ -1,0 +1,16 @@
+{
+  "task": "Fix unique.py dedupe to remove duplicates while preserving first-seen order. Inputs may include unhashable lists or dicts. Do not mutate the input.",
+  "allowed_changed": [
+    "unique.py"
+  ],
+  "max_steps": 16,
+  "edits": [
+    {
+      "path": "unique.py",
+      "old": "    return list(set(values))",
+      "new": "    result = []\n    for value in values:\n        if value not in result:\n            result.append(value)\n    return result"
+    }
+  ],
+  "category": "behavioral",
+  "answer": "Fixed the requested behavior and preserved other behavior."
+}

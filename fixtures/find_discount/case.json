@@ -1,0 +1,11 @@
+{
+  "task": "Find the file and function that calculate the final total after a percentage discount. Name both in your answer. Do not edit files.",
+  "allowed_changed": [],
+  "max_steps": 12,
+  "edits": [],
+  "answer": "pricing.py: discounted_total",
+  "category": "read_search",
+  "required_errors": [],
+  "probes": [],
+  "notes": "Session 11: checker lives outside workspace; golden transcript tests the harness, not model quality."
+}

@@ -1,10 +1,10 @@
-"""What `runs/` is allowed to lose, and the two refusals that outrank the ask.
+"""What `.runtime/journals/` is allowed to lose, and the two refusals that outrank the ask.
 
     python scripts/prune_runs.py                         # report; deletes nothing
     python scripts/prune_runs.py --keep 40               # what that rule would drop
     python scripts/prune_runs.py --older-than 30 --apply
 
-Step 8 of docs/session-10.md. `runs/` only grows, and `*.jsonl` is gitignored,
+Step 8 of docs/session-10.md. `.runtime/journals/` only grows, and `*.jsonl` is gitignored,
 so the growth is invisible in every view of this repository anyone normally
 looks at: the first report you get is a disk that is full.
 
@@ -47,7 +47,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-RUNS = Path(__file__).resolve().parents[1] / "runs"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from agent.storage import RuntimePaths
+
+RUNS = RuntimePaths(Path(__file__).resolve().parents[1]).journals
 
 # Journals are named "<timestamp>-<6 hex>.jsonl", so a lexical sort is a
 # chronological one. Both "the newest run" and "--keep N" stand on that, and
@@ -124,7 +127,7 @@ def scan(path: Path) -> tuple[datetime | None, bool]:
 def _at(value: object) -> datetime | None:
     """An `at` epoch as a datetime, or None when the record has no usable one.
 
-    Every journal in `runs/` today carries a numeric `at` on `run_started`.
+    Every journal in `.runtime/journals/` today carries a numeric `at` on `run_started`.
     The check is here because D94 says an older shape gets a meaning rather
     than a crash, and the meaning is: fall back to the name, and if that
     cannot be dated either, the run has no age and no `--older-than` can
@@ -160,8 +163,8 @@ def started_from_name(path: Path) -> datetime | None:
 def collect(runs_dir: Path) -> list[Run]:
     """Every journal in `runs_dir`, oldest first.
 
-    `glob` and not `rglob`: `runs/workspaces/` is a directory of fixture
-    copies of other people's projects, and nothing under it is a journal.
+    `glob` and not `rglob`: only direct journal files are candidates.
+    Nested directories are never inspected or selected for deletion.
     """
     runs = []
     for path in sorted(runs_dir.glob("*.jsonl")):
@@ -325,7 +328,7 @@ def report(
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="prune_runs.py",
-        description="Report on runs/, and delete journals only when told to.",
+        description="Report on .runtime/journals/, and delete journals only when told to.",
     )
     parser.add_argument(
         "--older-than", type=float, metavar="DAYS",
@@ -341,7 +344,7 @@ def main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--runs", type=Path, default=RUNS, metavar="DIR",
-        help="the directory of journals (default: the project's runs/)",
+        help="the directory of journals (default: the project's .runtime/journals/)",
     )
     args = parser.parse_args(argv)
 

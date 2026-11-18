@@ -60,7 +60,7 @@ from agent.journal import (
 )
 from agent.loop import LoopResult, run_loop
 from agent.model import ModelConfig, ModelError, ModelResponse, active_provider, context_warning
-from agent.policy import workspace_root
+from agent.storage import JOURNALS_DIR, workspace_root
 from agent.replay import plans_for
 from agent.retry import REASON_TEXT, RetryPolicy
 from agent.tools import TOOL_SCHEMAS, ToolResult
@@ -129,7 +129,7 @@ TOOLS_SYSTEM_PROMPT = (
 
 # Named once so the parser, the usage line and the debug presets below cannot
 # drift apart.
-RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
+RUNS_DIR = JOURNALS_DIR
 
 TOOLS_FLAG = "--tools"
 RAW_FLAG = "--raw"

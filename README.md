@@ -123,16 +123,47 @@ and warn.
 | `scripts/fault_matrix.py` | Every fixture case × every crash point, graded by the verifier |
 | `scripts/repeat_audit.py` | Replays past journals through the repetition rule |
 | `scripts/prune_runs.py` | Retention: never the newest run, never an unfinished one |
+| `.runtime/journals/` | Durable execution journals used by tracing and resume |
+| `.runtime/eval-workspaces/` | Disposable per-evaluation fixture copies |
+| `.runtime/migrations/` | Checksum manifests from explicit storage migrations |
 | `playground/` | The default writable workspace; `--workspace=` overrides it per run |
 
 `.env` and anything real live outside `playground/`.
+
+Generated execution data lives under the gitignored `.runtime/` directory:
+
+```text
+.runtime/
+├── journals/          # Execution history and crash recovery
+├── eval-workspaces/   # Disposable fixture copies
+└── migrations/        # Migration checksum manifests
+```
+
+These directories are created when needed. Fixture templates remain in
+`fixtures/`; evaluation result tables remain in `evals/results/`. Journals are
+recovery data: deleting them loses history and the ability to resume those
+runs. Evaluation workspaces can be discarded once their changes no longer
+need inspection.
+
+For older checkouts with a `runs/` directory, migrate explicitly:
+
+```bash
+python scripts/migrate_runtime.py
+```
+
+The migration checks for conflicts before moving data, preserves journal
+bytes, verifies moved data with checksums, and removes only the emptied old
+directories. Rerunning it after completion is a no-op. Existing journal and
+result records keep their original bytes; tracing, the eval result reader,
+and workspace entry points resolve their old artifact paths to the new
+locations. Historical session notes may still refer to `runs/`.
 
 ## Docs
 
 `docs/mini-coding-agent-plan.md` is the course plan. One doc per session, each
 with the decisions it locked, the build order, a failure table, the invariants
 carried forward and a self-test — written before the code and updated with what
-actually happened. Sessions 10-15 are written and not yet built.
+actually happened. Sessions 12-15 are written and not yet built.
 
 ## Progress
 
@@ -156,11 +187,31 @@ actually happened. Sessions 10-15 are written and not yet built.
       stream; latency, model id and the tool menu added to the journal first;
       tool output bounded by default. A survey of all 132 journals found six
       schema generations where the doc assumed three)
-- [ ] 11. 10 eval tasks + runner
+- [x] 11. 10 eval tasks + runner (fresh workspaces, independent checkers,
+      JSONL rows and summaries, deadlines and spend ceiling; scripted 10/10,
+      live 10/10 then 30/30. These small fixtures remain a smoke test; see
+      [`evals/session-11-report.md`](evals/session-11-report.md))
 - [ ] 12. 20 tasks, baseline comparison report
 - [ ] 13. FastAPI, isolated workspace per run
 - [ ] 14. Persistent memory: resume by default + a memory file outside the workspace
 - [ ] 15. Docker, docs, demo
+
+## Evaluation suite
+
+```bash
+python -m evals.run --mode golden --repeats 1   # offline harness check
+python -m evals.run --mode live --repeats 3    # configured provider; needs prices
+python -m evals.run --summary evals/results/<suite>.jsonl
+```
+
+The runner defaults to three repetitions and a $1 estimated suite ceiling.
+Hosted runs require configured prices or `--prices HIT MISS OUTPUT` in USD
+per million tokens. `--cases tail_window` selects cases; `--timeout` and
+`--check-timeout` bound worker and checker execution. Every run gets a fresh
+workspace. Results are fsynced after each case; fatal provider errors or
+uncertain spend stop the suite while preserving completed rows. Existing
+result files are never overwritten. Negative controls (`noop`, `wrong_file`,
+`double_edit`, `half_edit`) deliberately demonstrate failing grades.
 
 ## After Session 15
 
@@ -175,3 +226,33 @@ IMPLEMENTED**, and nothing starts until all 15 sessions are done. The
 
 Kept in `notes/` — one entry per session: goal, what I implemented, the failure
 I triggered, expected vs observed, what I learned, open questions, next step.
+
+### Session 12: paired comparisons
+
+`evals.compare` evaluates one registered prompt sentence against the existing
+CLI prompt. It uses 20 tasks × 3 repetitions × 2 arms, interleaves A/B on fresh
+workspaces, runs the four reserved cases last, and prints progress without
+intermediate scores. It refuses uncommitted or changed live protocols, changed
+fixtures/source, and an estimate above the configured suite ceiling. Known
+usage survives provider errors; fatal errors or uncertain billing stop the
+suite and preserve completed rows. Existing CLI defaults remain unchanged.
+
+```bash
+# Freeze decisions, fixture hashes, configured budgets and historical usage.
+python -m evals.register --baseline evals/results/session-11-live-three.jsonl \
+  --output evals/results/session-12-protocol.json
+# Commit that protocol before live execution. Run offline first.
+python -m evals.compare --protocol evals/results/session-12-protocol.json \
+  --mode golden --output /tmp/session-12-offline.jsonl
+python -m evals.compare --protocol evals/results/session-12-protocol.json \
+  --mode live --output evals/results/session-12-live.jsonl
+# Regenerates every comparison statistic and decision from durable rows alone.
+python -m evals.compare --report evals/results/session-12-live.jsonl
+```
+
+The registered rule requires at least 10 percentage points of success gain,
+McNemar p≤0.05, no increase in unexpected-change runs, token and latency ratios
+at most 1.25, and no reversal on the reserved cases. Partial and scripted
+results cannot ship. Repeated observations are correlated; the report states
+this limitation and includes a conservative interval based on case means.
+See [Session 12 results](evals/session-12-report.md) for evidence and limitations.

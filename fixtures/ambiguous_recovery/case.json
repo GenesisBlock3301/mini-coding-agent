@@ -1,0 +1,30 @@
+{
+  "task": "In fees.py, change only domestic_fee so weight 10 receives 15. First try replace_text with old=\"if weight > 10:\" and new=\"if weight >= 10:\" to confirm ambiguity is refused. Then recover using a unique anchor. Keep export_fee unchanged.",
+  "allowed_changed": [
+    "fees.py"
+  ],
+  "max_steps": 12,
+  "edits": [
+    {
+      "path": "fees.py",
+      "old": "def domestic_fee(weight):\n    if weight > 10:",
+      "new": "def domestic_fee(weight):\n    if weight >= 10:"
+    }
+  ],
+  "answer": "Fixed it.",
+  "category": "boundary",
+  "required_errors": [
+    "multiple_matches"
+  ],
+  "probes": [
+    {
+      "name": "replace_text",
+      "arguments": {
+        "path": "fees.py",
+        "old": "if weight > 10:",
+        "new": "if weight >= 10:"
+      }
+    }
+  ],
+  "notes": "Session 11: checker lives outside workspace; golden transcript tests the harness, not model quality."
+}

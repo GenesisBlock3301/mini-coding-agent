@@ -1,0 +1,16 @@
+{
+  "task": "Fix merge.py merged: return a new mapping with override values winning, without changing either input. Nested values need not be deep copied.",
+  "allowed_changed": [
+    "merge.py"
+  ],
+  "max_steps": 16,
+  "edits": [
+    {
+      "path": "merge.py",
+      "old": "    base.update(override)\n    return base",
+      "new": "    result = base.copy()\n    result.update(override)\n    return result"
+    }
+  ],
+  "category": "behavioral",
+  "answer": "Fixed the requested behavior and preserved other behavior."
+}

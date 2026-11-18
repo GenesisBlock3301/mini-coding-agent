@@ -46,7 +46,10 @@ def _load_harness():
 
 
 fixture = _load_harness()
-CASES = fixture.list_cases()
+# These Session 7 tests specifically describe single-edit, initially broken
+# fixtures. Session 11 includes read-only and multi-edit cases, covered by
+# test_evals.py rather than pretending every fixture has a single golden edit.
+CASES = ["tail_window", "twice_over", "loud_comment"]
 
 
 def build(case, tmp_path: Path, name: str = "ws") -> Path:

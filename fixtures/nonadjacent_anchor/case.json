@@ -1,0 +1,16 @@
+{
+  "task": "Fix domestic shipping in shipping.py: 10 kg qualifies for HEAVY_FEE. International and archival pricing retain strict > 10 thresholds.",
+  "allowed_changed": [
+    "shipping.py"
+  ],
+  "max_steps": 16,
+  "edits": [
+    {
+      "path": "shipping.py",
+      "old": "def domestic(weight):\n    if weight > 10:",
+      "new": "def domestic(weight):\n    if weight >= 10:"
+    }
+  ],
+  "category": "behavioral",
+  "answer": "Fixed the requested behavior and preserved other behavior."
+}

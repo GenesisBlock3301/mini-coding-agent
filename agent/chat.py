@@ -66,7 +66,7 @@ from agent.cli import (
 from agent.journal import Journal, JournalCorrupt, new_run_id, rebuild
 from agent.loop import LoopResult, run_loop, tool_message
 from agent.model import ModelConfig, ModelError, active_provider, call_model, context_warning
-from agent.policy import workspace_root
+from agent.storage import workspace_root
 from agent.retry import RetryPolicy
 from agent.tools import TOOL_SCHEMAS, ToolResult
 from agent.tracing import load as load_journal, segments, timeline

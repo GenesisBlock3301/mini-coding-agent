@@ -60,7 +60,9 @@ from agent.journal import (
     TOOL_OUTCOME,
 )
 
-RUNS_DIR = Path(__file__).resolve().parents[1] / "runs"
+from agent.storage import JOURNALS_DIR, PATHS
+
+RUNS_DIR = JOURNALS_DIR
 
 # How much of a tool result the bounded form keeps. One line is enough to say
 # what KIND of thing came back - a listing, a refusal, a file's first line -
@@ -131,7 +133,7 @@ def load(run: str | Path, *, runs_dir: Path = RUNS_DIR) -> Trace:
     record, and the 131 records before it are still the only account of what
     happened to someone's files.
     """
-    path = Path(run)
+    path = PATHS.resolve_artifact(run)
     if not path.suffix:
         path = runs_dir / f"{run}.jsonl"
 
@@ -239,7 +241,8 @@ def summary(trace: Trace) -> dict[str, Any]:
         "run_id": trace.run_id,
         "schema": trace.schema,
         "task": started.get("task"),
-        "workspace": started.get("workspace"),
+        "workspace": (str(PATHS.resolve_artifact(started['workspace']))
+                      if started.get('workspace') else None),
         "budget": started.get("budget"),
         "models": sorted({r.get("model") for r in results if r.get("model")}) or None,
         "tools_offered": _tools_offered(results),

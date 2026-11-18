@@ -3,7 +3,7 @@
 Owns: appending one JSON record per event, reading them back, and rebuilding
 the exact message history a crashed run had in memory.
 
-    runs/20261105T143012-a19f3c.jsonl
+    .runtime/journals/20261105T143012-a19f3c.jsonl
 
 The rule the whole thing rests on: **a record is written BEFORE the side
 effect it authorises.** `model_result` lands before any tool runs, so a resume
@@ -31,7 +31,7 @@ from typing import Any
 
 # Session 10, D94. The shape of the records below, stamped once per run in
 # `run_started`. A journal without it is generation 0 - which is 30 of the 132
-# files in `runs/` today, and every one of them still rebuilds.
+# files in `.runtime/journals/` today, and every one of them still rebuilds.
 #
 # The absence table. Six field-level generations exist on disk, discovered by
 # grouping every record by its exact key set rather than by reading this
@@ -74,7 +74,7 @@ class JournalCorrupt(Exception):
 
 
 def new_run_id() -> str:
-    """Sortable by time, unique by luck. `ls runs/` is then chronological."""
+    """Sortable by time, unique by luck. `ls .runtime/journals/` is then chronological."""
     return f"{time.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
 

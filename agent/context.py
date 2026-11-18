@@ -36,7 +36,7 @@ from typing import Any
 
 # 3.5, not the usual rule-of-thumb 4, and the difference is a measurement
 # rather than a preference. Two real DeepSeek requests from
-# runs/20261116T102728-d4263f read 0.90 and 0.91 against the provider's own
+# .runtime/journals/20261116T102728-d4263f read 0.90 and 0.91 against the provider's own
 # prompt_tokens at 4 chars/token - a consistent 10% UNDER-read, which is the
 # dangerous direction: the check passes and the provider disagrees. At 3.5
 # the same two requests read 1.02 and 1.04, which errs toward stopping one

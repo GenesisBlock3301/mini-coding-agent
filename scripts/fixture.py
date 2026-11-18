@@ -16,7 +16,7 @@ D53/D54  The template IS the source of truth and a reset is a fresh copy, not
          write tool does when it goes wrong. A copy has no such blind spot and
          works on a dirty tree.
 
-D55      `build` returns a NEW directory per run, under runs/workspaces/.
+D55      `build` returns a NEW directory per run, under .runtime/eval-workspaces/.
          Point a run at it with `python -m agent.cli --workspace=<dir> ...`.
          Runs that share a workspace are not repetitions of an experiment;
          they are one experiment with a growing amount of prior state.
@@ -46,14 +46,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from agent.storage import EVAL_WORKSPACES_DIR, PATHS
+
 FIXTURES_DIR = PROJECT_ROOT / "fixtures"
 
 # Every build and every reset happens under here, and nowhere else. `reset`
 # deletes a directory tree, and a tool that deletes a tree should be able to
 # say in one sentence which trees it can reach: this one can reach
-# runs/workspaces/ and nothing above it. A typo'd --workspace is then a
+# .runtime/eval-workspaces/ and nothing above it. A typo'd --workspace is then a
 # refusal rather than a morning spent in a backup.
-BUILD_DIR = PROJECT_ROOT / "runs" / "workspaces"
+BUILD_DIR = EVAL_WORKSPACES_DIR
 
 # Not hashed, not reported as a change: these are produced by running the
 # workspace's own code, not by the agent. check.py runs under -B so they
@@ -78,6 +81,11 @@ class Case:
     golden: dict[str, str]
     max_steps: int | None
     notes: str
+    edits: tuple[dict[str, str], ...] = ()
+    answer: str = "Fixed it."
+    category: str = "simple_edit"
+    required_errors: tuple[str, ...] = ()
+    probes: tuple[dict, ...] = ()
 
     @property
     def directory(self) -> Path:
@@ -110,6 +118,8 @@ def load_case(name: str) -> Case:
     Validated here rather than at use time so that a malformed case fails
     before a run is started, not after one has been paid for.
     """
+    if name not in list_cases():
+        raise CaseError(f"Unknown fixture case: {name!r}")
     directory = FIXTURES_DIR / name
     case_file = directory / "case.json"
     if not case_file.is_file():
@@ -126,20 +136,38 @@ def load_case(name: str) -> Case:
         raise CaseError(f"{case_file} needs a non-empty 'task'.")
 
     allowed = data.get("allowed_changed", [])
-    if not isinstance(allowed, list) or not all(isinstance(p, str) for p in allowed):
+    if not isinstance(allowed, list) or not all(
+        isinstance(p, str) and p and not Path(p).is_absolute() and '..' not in Path(p).parts
+        for p in allowed
+    ):
         raise CaseError(f"{case_file}: 'allowed_changed' must be a list of paths.")
 
     golden = data.get("golden", {})
-    if not isinstance(golden, dict) or {"path", "old", "new"} - set(golden):
-        raise CaseError(f"{case_file}: 'golden' needs 'path', 'old' and 'new'.")
+    edits = data.get("edits", [golden] if golden else [])
+    if not isinstance(edits, list) or any(
+        not isinstance(edit, dict) or set(edit) != {"path", "old", "new"}
+        or not all(isinstance(v, str) for v in edit.values())
+        or not edit['path'] or not edit['old']
+        or Path(edit["path"]).is_absolute() or ".." in Path(edit["path"]).parts
+        for edit in edits
+    ):
+        raise CaseError(f"{case_file}: edits need relative path, old and new strings.")
+    max_steps = data.get("max_steps")
+    if max_steps is not None and (type(max_steps) is not int or max_steps < 1):
+        raise CaseError(f"{case_file}: max_steps must be a positive integer.")
 
     case = Case(
         name=name,
         task=task,
         allowed_changed=tuple(allowed),
-        golden={k: golden[k] for k in ("path", "old", "new")},
-        max_steps=data.get("max_steps"),
+        golden=golden,
+        max_steps=max_steps,
         notes=data.get("notes", ""),
+        edits=tuple(edits),
+        answer=data.get("answer", "Fixed it."),
+        category=data.get("category", "simple_edit"),
+        required_errors=tuple(data.get("required_errors", [])),
+        probes=tuple(data.get("probes", [])),
     )
 
     if not case.template.is_dir():
@@ -178,7 +206,7 @@ def hash_tree(root: Path) -> dict[str, str]:
 
 def _require_disposable(path: Path) -> Path:
     """Refuse any path this harness is not allowed to delete."""
-    resolved = path.expanduser().resolve()
+    resolved = PATHS.resolve_artifact(path).expanduser().resolve()
     build_root = BUILD_DIR.resolve()
     if resolved == build_root or build_root not in resolved.parents:
         raise CaseError(
@@ -202,7 +230,8 @@ def build(case: Case, into: Path | None = None) -> Path:
     if target.exists():
         raise CaseError(f"{target} already exists. Use `reset` to reuse it.")
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(case.template, target, symlinks=True)
+    shutil.copytree(case.template, target, symlinks=True,
+                    ignore=shutil.ignore_patterns(*IGNORED_NAMES))
     return target
 
 
@@ -212,7 +241,8 @@ def reset(case: Case, workspace: Path) -> Path:
     if target.exists():
         shutil.rmtree(target)
     target.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(case.template, target, symlinks=True)
+    shutil.copytree(case.template, target, symlinks=True,
+                    ignore=shutil.ignore_patterns(*IGNORED_NAMES))
     return target
 
 
@@ -273,7 +303,7 @@ class Report:
         return self.check_ok and not self.unexpected
 
 
-def run_check(case: Case, workspace: Path) -> tuple[bool, str]:
+def run_check(case: Case, workspace: Path, *, answer: str = "") -> tuple[bool, str]:
     """Run the case's check script against a workspace, in its own process.
 
     Its own process because the check imports code the agent has edited, and
@@ -290,6 +320,7 @@ def run_check(case: Case, workspace: Path) -> tuple[bool, str]:
             [sys.executable, "-I", "-B", str(case.check_script), str(workspace)],
             capture_output=True,
             text=True,
+            input=answer,
             timeout=CHECK_TIMEOUT_S,
             cwd=str(PROJECT_ROOT),
         )
@@ -299,12 +330,12 @@ def run_check(case: Case, workspace: Path) -> tuple[bool, str]:
     return completed.returncode == 0, output
 
 
-def verify(case: Case, workspace: Path) -> Report:
+def verify(case: Case, workspace: Path, *, answer: str = "") -> Report:
     """The whole verdict: the check, plus what moved on disk."""
-    resolved = workspace.expanduser().resolve()
+    resolved = PATHS.resolve_artifact(workspace).expanduser().resolve()
     if not resolved.is_dir():
         raise CaseError(f"{workspace} is not a directory.")
-    check_ok, output = run_check(case, resolved)
+    check_ok, output = run_check(case, resolved, answer=answer)
     changed = changes(case, resolved)
     return Report(
         case=case.name,
@@ -324,17 +355,12 @@ def apply_golden(case: Case, workspace: Path) -> None:
     grades proves less than it appears to. tests/test_fixture.py drives the
     real tool separately.
     """
-    target = workspace / case.golden["path"]
-    text = target.read_text(encoding="utf-8")
-    if text.count(case.golden["old"]) != 1:
-        raise CaseError(
-            f"{case.name}: the golden 'old' matches "
-            f"{text.count(case.golden['old'])} times in {case.golden['path']} - "
-            "the answer key does not fit the template."
-        )
-    target.write_text(
-        text.replace(case.golden["old"], case.golden["new"]), encoding="utf-8"
-    )
+    for edit in case.edits:
+        target = workspace / edit["path"]
+        text = target.read_text(encoding="utf-8")
+        if text.count(edit["old"]) != 1:
+            raise CaseError(f"{case.name}: golden anchor must match exactly once.")
+        target.write_text(text.replace(edit["old"], edit["new"]), encoding="utf-8")
 
 
 def _print_report(report: Report) -> None:

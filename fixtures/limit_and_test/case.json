@@ -1,0 +1,25 @@
+{
+  "task": "Increase the default page size from 20 to 25 in settings.py and update the assertion in test_settings.py. Do not remove assertions.",
+  "allowed_changed": [
+    "settings.py",
+    "test_settings.py"
+  ],
+  "max_steps": 12,
+  "edits": [
+    {
+      "path": "settings.py",
+      "old": "PAGE_SIZE = 20",
+      "new": "PAGE_SIZE = 25"
+    },
+    {
+      "path": "test_settings.py",
+      "old": "assert PAGE_SIZE == 20",
+      "new": "assert PAGE_SIZE == 25"
+    }
+  ],
+  "answer": "Fixed it.",
+  "category": "multi_file",
+  "required_errors": [],
+  "probes": [],
+  "notes": "Session 11: checker lives outside workspace; golden transcript tests the harness, not model quality."
+}

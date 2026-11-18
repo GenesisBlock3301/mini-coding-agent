@@ -1,0 +1,13 @@
+{
+  "task": "The calculator's subtract function adds the two numbers instead of subtracting the second from the first. Fix subtraction while preserving addition.",
+  "allowed_changed": ["calculator.py"],
+  "max_steps": 8,
+  "category": "simple_edit",
+  "golden": {
+    "path": "calculator.py",
+    "old": "def subtract(a, b):\n    return a + b",
+    "new": "def subtract(a, b):\n    return a - b"
+  },
+  "answer": "Fixed subtract in calculator.py to return a - b; addition is unchanged.",
+  "notes": "Addition uses the same expression intentionally: replacing every a + b would break an already-correct function. The checker covers operand order, negative numbers, zero, and addition."
+}

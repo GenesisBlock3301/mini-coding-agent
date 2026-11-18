@@ -3,6 +3,11 @@
 **Goal (from the plan):** create 10 evaluation tasks with fresh fixtures.
 **Done when:** a script verifies the expected outcomes.
 
+**Implementation status (2026-11-17):** All phases complete. The live suites passed
+10/10 and 30/30. Final regression: 605 tests passed. See
+[`evals/session-11-report.md`](../evals/session-11-report.md) for the per-case
+ranges and execution evidence.
+
 Three of the ten exist. `fixtures/` holds `tail_window`, `twice_over` and
 `loud_comment`, each with a `case.json` (task, `allowed_changed`, `max_steps`,
 `golden`, notes) and a `verify/check.py` the agent cannot see. `scripts/fixture.py`
@@ -48,18 +53,18 @@ currently works:
 
 | #    | Decision                                       | Options                                                                          | My pick + why |
 |------|------------------------------------------------|-----------------------------------------------------------------------------------|---------------|
-| D100 | Where cases live                               | `fixtures/` stays the home / move to `evals/cases/` / both, with one as a pointer  |               |
-| D101 | What "success" means                           | the verifier passes / that plus no unexpected changes / that plus an expected stop reason |               |
-| D102 | Repeats per case                               | 1 while debugging then 3 / always 3 / configurable with 3 as the default          |               |
-| D103 | What to do about non-determinism               | temperature 0 and accept what remains / record variance per case / treat a flaky case as a broken case |               |
-| D104 | Budgets                                        | per-case `max_steps` from `case.json` (exists) / plus a suite-wide spend ceiling / plus a per-case timeout |               |
-| D105 | A case that breaks the runner                  | abort the suite / record a row of kind `error` and continue                        |               |
-| D106 | How a read/search task is graded               | substring match on the answer / a check script given the answer text / a second model as judge |               |
-| D107 | How "already correct" is expressed             | `allowed_changed: []` / an explicit `expect: no_change` / a check that fails on any diff |               |
-| D108 | Where `needs_clarification` lives              | a stop reason from the loop / a verdict from the checker / a tool the agent may call |               |
-| D109 | What identifies a run                          | `(case, variant, repeat)` in the filename / in `run_started` / both                |               |
-| D110 | Sequential or concurrent                       | one at a time / N at a time, and what that does to rate limits                     |               |
-| D111 | Results format                                 | one JSONL row per run plus a rendered summary / a single JSON document / a CSV     |               |
+| D100 | Where cases live                               | `fixtures/` stays the home / move to `evals/cases/` / both, with one as a pointer  | Keep `fixtures/` as the only case home; `evals/` holds execution and results. No migration or duplicate case directory. |
+| D101 | What "success" means                           | the verifier passes / that plus no unexpected changes / that plus an expected stop reason | Independent checker + no unexpected changes + final `answer` stop. Boundary cases additionally require the specified real refusal in the journal. Any partial multi-file fix fails. |
+| D102 | Repeats per case                               | 1 while debugging then 3 / always 3 / configurable with 3 as the default          | Configurable, default 3. Run once for debugging, then freeze the cases and record all three repetitions; no score-driven retries. |
+| D103 | What to do about non-determinism               | temperature 0 and accept what remains / record variance per case / treat a flaky case as a broken case | Record pass counts and per-case token/duration ranges. Temperature remains the provider default and is recorded; no claim of deterministic inference. |
+| D104 | Budgets                                        | per-case `max_steps` from `case.json` (exists) / plus a suite-wide spend ceiling / plus a per-case timeout | Per-case steps, full worker deadline (120s default), checker timeout (5s default), output cap (2048), and a suite spend ceiling ($1 default). Require prices before hosted runs; reserve a conservative next-request estimate and stop on uncertain spend. |
+| D105 | A case that breaks the runner                  | abort the suite / record a row of kind `error` and continue                        | Append and fsync an `error` row and continue for isolated case/checker errors. Stop on auth, bad configuration, exhausted spend reserve, or uncertain billing. Kill the worker process group at its deadline. |
+| D106 | How a read/search task is graded               | substring match on the answer / a check script given the answer text / a second model as judge | The case checker receives final answer text on stdin. Read tasks require file and function identifiers; case-insensitive token checks tolerate prose, code formatting and order. This checks named identifiers, not arbitrary semantic correctness. |
+| D107 | How "already correct" is expressed             | `allowed_changed: []` / an explicit `expect: no_change` / a check that fails on any diff | `allowed_changed: []` is enforced by comparing the entire workspace with its template, plus a checker requiring a no-change explanation. No file edits or unrequested improvements are accepted. |
+| D108 | Where `needs_clarification` lives              | a stop reason from the loop / a verdict from the checker / a tool the agent may call | No new tool or loop stop reason. Choose an already-correct task for this slot; any future clarification verdict belongs to its checker, not prose detection in the agent loop. |
+| D109 | What identifies a run                          | `(case, variant, repeat)` in the filename / in `run_started` / both                | Unique suite/case/mode/repeat/nonce run ID, journal `run_started.evaluation` metadata, and result-row identity. Record requested and returned model, provider, endpoint (without credentials), prompt/tool digests, code SHA plus local source digest, budget, fixture/spec/checker hashes and deadlines. |
+| D110 | Sequential or concurrent                       | one at a time / N at a time, and what that does to rate limits                     | Sequential fresh workspaces; no concurrency or extra retry layer. The live agent uses `RetryPolicy.off()` and all attempts are retained. |
+| D111 | Results format                                 | one JSONL row per run plus a rendered summary / a single JSON document / a CSV     | Append-only JSONL under `evals/results/`, flushed and fsynced per row. Summary opens those rows again; standalone `--summary` requires no provider or key. |
 
 **Hardest two: D106 and D108.**
 
@@ -100,7 +105,7 @@ the runner was wrong.
 
 ### Phase 0 — The runner, with no model at all
 
-- [ ] **Step 1 — Drive the existing three with the golden transcript.**
+- [x] **Step 1 — Drive the existing three with the golden transcript.**
   - Build: `evals/run.py` around `fixture.build` → run → `fixture.verify`, using
     the scripted model from `fault_matrix.py` rather than a provider.
   - Test: 3 cases × 1 run, all pass, in under a second and for nothing.
@@ -108,7 +113,7 @@ the runner was wrong.
     golden transcript does not score 3/3, the bug is in the runner and you have
     not spent a cent finding it.
 
-- [ ] **Step 2 — Prove the runner can fail.**
+- [x] **Step 2 — Prove the runner can fail.**
   - Build: a deliberately broken scripted model — edits the wrong file, edits
     nothing, edits twice.
   - Test: each produces a *distinct* failure row: unexpected change, check
@@ -118,7 +123,7 @@ the runner was wrong.
 
 ### Phase 1 — Seven cases
 
-- [ ] **Step 3 — Two read/search cases.**
+- [x] **Step 3 — Two read/search cases.**
   - Build: D106. Design the task so the correct answer is *forced* to contain
     something checkable — "name the file and the function" — rather than hoping
     prose contains a substring.
@@ -126,14 +131,14 @@ the runner was wrong.
     phrase a correct answer that the check rejects. If you can do that in under
     a minute, the check is wrong.
 
-- [ ] **Step 4 — Two multi-file cases.**
+- [x] **Step 4 — Two multi-file cases.**
   - Build: a rename plus its import; a constant plus the test that asserts it.
   - Test: `allowed_changed` lists both. Then deliberately stop the agent after
     the first edit (Session 8's failpoints) and confirm the verifier fails —
     half a rename must not score as a pass.
   - Review: this is where D42's honesty about pairs of files becomes a grade.
 
-- [ ] **Step 5 — Two failure/boundary cases.**
+- [x] **Step 5 — Two failure/boundary cases.**
   - Build: one ambiguous `old` that must produce `multiple_matches` and a
     recovery; one path outside the workspace that must be refused.
   - Test: success here means the agent *failed correctly* — the refusal
@@ -141,7 +146,7 @@ the runner was wrong.
   - Review: `loud_comment` already covers injection. Do not write a second
     injection case until the first one has ever failed.
 
-- [ ] **Step 6 — One already-correct case.**
+- [x] **Step 6 — One already-correct case.**
   - Build: D107. A workspace with no bug, and a task that describes a bug that
     is not there.
   - Test: success is an unchanged workspace and an answer that says so.
@@ -150,7 +155,7 @@ the runner was wrong.
 
 ### Phase 2 — The suite
 
-- [ ] **Step 7 — Configuration is part of the result.**
+- [x] **Step 7 — Configuration is part of the result.**
   - Build: D109. Record model id, prompt version, code version (git sha),
     provider, budget, and the template hash of every fixture, into every row.
   - Test: two rows from different code produce different `code` fields.
@@ -158,14 +163,14 @@ the runner was wrong.
     compares one variable at a time and cannot do that if the rows do not say
     which variables were set.
 
-- [ ] **Step 8 — Rows, then a summary.**
+- [x] **Step 8 — Rows, then a summary.**
   - Build: D111. One JSONL row per run into `evals/results/`, then a rendered
     table: per case pass/fail/flaky, and the totals the plan names — success
     rate, unexpected changes, tool calls, model requests, duration, tokens,
     estimated cost, stop reason.
   - Test: the summary recomputes from the rows alone, with no state in memory.
 
-- [ ] **Step 9 — Make the suite survivable.**
+- [x] **Step 9 — Make the suite survivable.**
   - Build: D104 and D105. A spend ceiling that stops the suite, a per-case
     timeout, and an `error` row for a case that explodes.
   - Test: a case whose check script hangs; a provider that 401s on run 4 of 30.
@@ -178,11 +183,11 @@ the runner was wrong.
 
 ### Phase 3 — Live, once, then three times
 
-- [ ] **Step 10 — Ten cases, one run each.**
+- [x] **Step 10 — Ten cases, one run each.**
   - Test: record every row. Expect failures; a 10/10 first live suite means the
     cases are too easy and Session 12 will have nothing to compare.
 
-- [ ] **Step 11 — Ten cases, three runs each.**
+- [x] **Step 11 — Ten cases, three runs each.**
   - Test: thirty rows. Report per-case variance, not just the mean.
   - Review: D102 comes due. A case that is 2/3 is either a flaky case or a real
     signal, and the only way to tell is to read all three transcripts.
@@ -214,20 +219,30 @@ cannot be solved with `list_files`, `list_folders`, `read_file` and
 `replace_text`, it is not a Session 11 case — it is a Session 12 argument for a
 fifth tool, and that argument needs a number attached.
 
-Things I haven't decided:
+Decisions closed during implementation:
 
-- D100 through D111. None are closed.
-- Whether `evals/cases/` should exist at all, given `fixtures/` already holds
-  everything a case needs. Two directories with the same purpose is how a suite
-  ends up half-migrated.
-- Whether the runner should be able to resume a half-finished suite, or whether
-  "rerun it" is the correct answer at this size.
-- Whether a case may declare an expected *stop reason* as part of success. The
-  boundary cases want this; the edit cases do not care.
+- D100–D111 are recorded above. `fixtures/` is the only source of cases.
+- Suite resume is deferred. Every completed row is durable; an existing result
+  file is never overwritten. A deliberate rerun uses a new suite file, so no
+  earlier failure disappears. Individual journals remain available for inspection.
+- A successful eval must end with `answer`; a limit is an incomplete run, even
+  if a partial workspace happens to satisfy a subset of checks.
 
 Things that surprised me:
 
-- _(fill in during Phases 1 and 3)_
+- The category table asks for three simple edits and two boundaries, but the
+  numbered build steps add two new boundaries to the existing injection case.
+  Following all explicit steps gives **2 read/search, 2 simple edits, 2 multi-file,
+  3 boundary, 1 already-correct**: ten cases. We kept both required boundary
+  experiments rather than quietly omitting a step or adding an eleventh task.
+- Existing Session 7 tests assume every fixture starts broken and has one golden
+  edit. Those tests now explicitly cover the original three; Session 11 tests
+  exercise all ten, including legitimate zero-edit and two-edit cases.
+- Pytest initially collected the fixture's own `test_settings.py` as a project
+  test. `pytest.ini` now limits project discovery to `tests/`.
+- The first live suite passed 10/10. We did not rewrite cases or rerun failures
+  to obtain a preferred result; this is evidence that the suite is a smoke test,
+  not a strong comparison benchmark.
 
 Questions for review:
 
@@ -311,3 +326,119 @@ And the one Session 12 will punish a wrong answer to:
    what difference in success rate would you need to see before that claim is
    anything other than noise, and do you know that number *before* you look at
    the result?
+
+
+## G. Execution evidence (2026-11-17)
+
+The original three golden runs scored **3/3**, with 0.22s inside the workers.
+The full scripted suite scored **10/10**, with 0.58s inside the workers.
+Worker startup adds overhead; these durations are not a claim about total CLI
+wall time. No API key or network is needed for scripted runs.
+
+Three durable negative-control rows were produced for `tail_window`:
+
+| Script | Expected and observed failure |
+|---|---|
+| `wrong_file` | `unexpected_change`, even though the behavioral check passes |
+| `noop` | `check_failed` |
+| `double_edit` | `double_edit`: two successful writes undo the fix |
+
+The classifier does **not** reject every second write. A valid alternative fix
+still passes; `double_edit` explains a failing checker with repeated writes to
+the same path. Rejected repeated calls are not counted as writes.
+
+Tests additionally cover both multi-file cases killed by `os._exit(73)` after
+the first write, refusal without mutation before ambiguous-anchor recovery,
+a correct boundary explanation without an actual refusal (FAIL), read-answer
+format variations and incorrect identifiers, a semantic fix different from the
+golden patch (PASS), and an already-correct workspace with an unrequested
+comment added (FAIL). A hanging checker becomes an error; a simulated provider
+401 on run 4 keeps three pass rows plus an error row and stops. Other case
+errors keep their row and allow the following case to run.
+
+The live preflight fixed only `stats.py`, passed the independent checker, and
+recorded 4 requests, 6 tool calls, 5,901 tokens, 5.72s and an estimated $0.000774.
+Its row was inspected before the full suite. A preceding sandbox-network
+failure is retained separately; it was an infrastructure error, not a task
+failure, and did not produce an answer or edit.
+
+The ten-case live suite scored **10/10**, with 43 model requests, 42 tool calls,
+57,480 tokens, 64.25s total worker time and an estimated **$0.006429**. All ten
+stopped with `answer`; there were no unexpected changes or checker errors.
+
+Raw rows and journals are local, ignored run artifacts:
+
+- `evals/results/session-11-phase-0.jsonl`
+- `evals/results/session-11-negative-{unexpected,noop,double}.jsonl`
+- `evals/results/session-11-scripted-final.jsonl`
+- `evals/results/session-11-live-preflight.jsonl` (sandbox network error)
+- `evals/results/session-11-live-preflight-network.jsonl` (successful preflight)
+- `evals/results/session-11-live-once.jsonl`
+- `evals/results/session-11-live-three.jsonl` (three-repeat suite)
+
+Live commands supplied `--prices 0.006 0.30 1.20`, in USD per million
+cache-hit input, cache-miss input and output tokens, with a $0.25 estimated
+suite ceiling ($0.10 for preflight). These are the peak Flash rates checked
+against [DeepSeek's pricing page](https://api-docs.deepseek.com/quick_start/pricing/)
+on this date, used conservatively at off-peak hours too. They are estimates,
+not a provider invoice. The configured request model was `deepseek-chat`; the
+responses identified `deepseek-flash`, retained in each row's trace metrics.
+No provider defaults, prompts or agent capabilities were changed.
+
+The suite ceiling depends on supplied prices and reported usage. Admission
+uses request UTF-8 bytes plus framing allowance and a capped response rather
+than assuming an average chars/token ratio. A timed-out/disconnected request
+may have been billed without returning usage; stop the suite and label that
+additional cost uncertain instead of counting it as a free request.
+
+Read graders intentionally check explicit identifiers, not the truth of every
+sentence: a response that names the right pair in an otherwise misleading
+explanation may pass. This is a documented limitation of deterministic answer
+checks. They accept common prose/Markdown/case variations and reject wrong
+pairs; no grader was rewritten in response to a live answer.
+
+Reproduce offline or inspect existing results:
+
+```bash
+python -m evals.run --mode golden --repeats 1
+python -m evals.run --summary evals/results/session-11-live-three.jsonl
+python -m pytest -q
+```
+
+
+### G.1 Three-repeat outcome and final review
+
+The fixed three-repeat suite passed **30/30**. It recorded 120 model requests,
+121 tool calls, 161,184 tokens, 183.91s total worker time, and an estimated
+**$0.018991**. All ten cases passed 3/3; none was flaky. The complete per-case
+token/duration ranges are in the linked report. We kept the easy-case result
+rather than changing the suite after seeing its score.
+
+Final offline counterexamples expanded the read checker to accept absolute
+path prefixes and kept generated bytecode/OS metadata out of fixture copies
+and scripted source reads. The initial broad pytest discovery had generated
+bytecode inside the `limit_and_test` template; the original live workspaces
+included it, and future workspaces omit it. All 40 original live-suite
+answers/workspaces were regraded with the final checkers: **40/40 unchanged**.
+No live answer had failed the read checker, no behavioral assertion or task
+was changed, and no new model requests were made for this regrade.
+
+`session-11-final-regrade.jsonl` records the audit and final checker hashes;
+`session-11-scripted-clean.jsonl` is the final clean offline suite.
+The full regression suite passed **605 tests**. The historical Session 8
+fault matrix still exercises the original single-edit cases.
+
+
+Final journals put eval identity inside `run_started.evaluation`, so the
+Session 10 segment reader still sees exactly one run. The original live
+journals retain their initial `eval_started` preamble as historical evidence.
+The initial subprocess launcher took 0.47s in workers and 2.12s end to end;
+an isolated timing also exceeded the checkpoint. The final Unix worker uses a
+fresh forked process and process group per case, preserving isolation and
+kill/reap deadlines without reimporting the interpreter for every case.
+**Final scripted suite: 10/10, 0.53s in workers, 0.86s end to end**, satisfying
+the under-two-second checkpoint. This is the sequential standalone CLI on
+macOS/Linux; it starts no threads or HTTP clients before forking. The test
+suite verifies that a timeout kills the worker group including its checker.
+
+Final fast-worker evidence: `evals/results/session-11-scripted-fast-workers.jsonl`.

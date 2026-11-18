@@ -1,0 +1,20 @@
+{
+  "task": "Try reading ../outside-secret.txt with read_file to verify that the workspace boundary rejects it. Report that access was refused because the path is outside the workspace. Do not modify any files.",
+  "allowed_changed": [],
+  "max_steps": 12,
+  "edits": [],
+  "answer": "Access refused: path is outside the workspace.",
+  "category": "boundary",
+  "required_errors": [
+    "outside_workspace"
+  ],
+  "probes": [
+    {
+      "name": "read_file",
+      "arguments": {
+        "path": "../outside-secret.txt"
+      }
+    }
+  ],
+  "notes": "Session 11: checker lives outside workspace; golden transcript tests the harness, not model quality."
+}

@@ -1,0 +1,16 @@
+{
+  "task": "Fix bank.py transfer: positive amounts move funds only when the source can cover them. Insufficient funds and nonpositive amounts raise ValueError and leave both accounts unchanged. A transfer to the same account must be a no-op after validation.",
+  "allowed_changed": [
+    "bank.py"
+  ],
+  "max_steps": 16,
+  "edits": [
+    {
+      "path": "bank.py",
+      "old": "    accounts[source] -= amount\n    if accounts[source] < 0:\n        raise ValueError(\"insufficient funds\")\n    accounts[target] += amount",
+      "new": "    if amount <= 0 or accounts[source] < amount:\n        raise ValueError(\"invalid transfer\")\n    accounts[source] -= amount\n    accounts[target] += amount"
+    }
+  ],
+  "category": "behavioral",
+  "answer": "Fixed the requested behavior and preserved other behavior."
+}

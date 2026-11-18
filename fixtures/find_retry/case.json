@@ -1,0 +1,11 @@
+{
+  "task": "Find the file and function that cap exponential retry delays at a maximum. Name both in your answer. Do not edit files.",
+  "allowed_changed": [],
+  "max_steps": 12,
+  "edits": [],
+  "answer": "net/backoff.py: retry_delay",
+  "category": "read_search",
+  "required_errors": [],
+  "probes": [],
+  "notes": "Session 11: checker lives outside workspace; golden transcript tests the harness, not model quality."
+}

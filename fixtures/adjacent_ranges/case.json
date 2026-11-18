@@ -1,0 +1,16 @@
+{
+  "task": "Fix ranges.py overlaps for half-open intervals [start,end). Touching endpoints and empty intervals never overlap. Reversed endpoints must raise ValueError.",
+  "allowed_changed": [
+    "ranges.py"
+  ],
+  "max_steps": 16,
+  "edits": [
+    {
+      "path": "ranges.py",
+      "old": "    return a[0] <= b[1] and b[0] <= a[1]",
+      "new": "    if a[0] > a[1] or b[0] > b[1]:\n        raise ValueError(\"reversed interval\")\n    return a[0] < a[1] and b[0] < b[1] and a[0] < b[1] and b[0] < a[1]"
+    }
+  ],
+  "category": "behavioral",
+  "answer": "Fixed the requested behavior and preserved other behavior."
+}

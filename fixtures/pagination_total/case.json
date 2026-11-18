@@ -1,0 +1,16 @@
+{
+  "task": "Fix api.py page to report total matching rows before pagination. offset and limit apply only to items; limit=0 returns no items. Preserve the input and the public response keys.",
+  "allowed_changed": [
+    "api.py"
+  ],
+  "max_steps": 16,
+  "edits": [
+    {
+      "path": "api.py",
+      "old": "\"total\": len(items)",
+      "new": "\"total\": len(rows)"
+    }
+  ],
+  "category": "behavioral",
+  "answer": "Fixed the requested behavior and preserved other behavior."
+}

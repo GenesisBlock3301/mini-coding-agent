@@ -392,7 +392,7 @@ def test_importing_the_script_prunes_nothing(tmp_path):
     """Rule 2, tested the only way it can be: by giving an import something to
     destroy and watching it not.
 
-    The script is copied where its own `parents[1] / "runs"` lands on a
+    The script is copied where its own `.runtime/journals/` lands on a
     populated directory, then imported. A module that swept on import, or kept
     a size cap that tripped on its own, would empty it here.
     """
@@ -400,8 +400,8 @@ def test_importing_the_script_prunes_nothing(tmp_path):
     scripts.mkdir()
     copy = scripts / "prune_runs.py"
     copy.write_bytes((PROJECT_ROOT / "scripts" / "prune_runs.py").read_bytes())
-    planted = tmp_path / "runs"
-    planted.mkdir()
+    planted = tmp_path / ".runtime" / "journals"
+    planted.mkdir(parents=True)
     for n in range(3):
         make_run(planted, 900 - n, f"aaaa{n:02}")
 

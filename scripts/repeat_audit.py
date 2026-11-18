@@ -2,7 +2,7 @@
 
     python scripts/repeat_audit.py [--failures N] [--calls N]
 
-Reads every journal in `runs/`, replays the calls it recorded through
+Reads every journal in `.runtime/journals/`, replays the calls it recorded through
 `agent.repetition`, and prints the runs the new rule would have ended early.
 No model, no network, no workspace: a journal records the tool name and the
 argument string with every `tool_intent`, which is exactly what the rule
@@ -36,7 +36,9 @@ from agent.repetition import (  # noqa: E402
     Tally,
 )
 
-RUNS = Path(__file__).resolve().parents[1] / "runs"
+from agent.storage import JOURNALS_DIR
+
+RUNS = JOURNALS_DIR
 
 
 def _events(path: Path) -> list[dict]:

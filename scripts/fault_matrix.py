@@ -245,10 +245,17 @@ def main(argv: list[str]) -> int:
         child(args[1], args[2], args[3], args[4])
         return 0  # unreachable when `when` != none
 
-    names = [a for a in args if not a.startswith("-")] or fixture.list_cases()
+    # This Session 8 experiment assumes one golden edit. Session 11 also has
+    # read-only and multi-file cases; they have their own crash tests.
+    names = [a for a in args if not a.startswith("-")] or [
+        name for name in fixture.list_cases() if fixture.load_case(name).golden
+    ]
     rows = []
     for name in names:
         case = fixture.load_case(name)
+        if not case.golden:
+            print(f"{name}: the fault matrix requires a single golden edit.", file=sys.stderr)
+            return 2
         for when in CRASH_POINTS:
             rows.append(one_row(case, when))
 
