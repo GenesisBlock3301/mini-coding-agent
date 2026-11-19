@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=70", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mini-coding-agent"
+version = "0.1.0"
+description = "A small terminal coding agent with bounded file tools and durable journals"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx==0.28.1",
+    "prompt_toolkit==3.0.52",
+    "python-dotenv==1.2.4",
+]
+
+[project.scripts]
+mini-agent = "agent.cli:console_main"
+mini-agent-chat = "agent.chat:console_main"
+
+[tool.setuptools]
+packages = ["agent"]

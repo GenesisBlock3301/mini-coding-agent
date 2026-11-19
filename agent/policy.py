@@ -1,6 +1,6 @@
 """Workspace boundaries and operation limits. (Session 2+)
 
-Resolves every path against the playground workspace and rejects escapes,
+Resolves every path against the selected workspace and rejects escapes,
 including symlinks. Enforces step, tool-call, output-size, duration and budget
 limits. These rules are enforced here in code, never by the prompt.
 """
@@ -10,34 +10,21 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_WORKSPACE = PROJECT_ROOT / "playground"
-
-
 def workspace_root(override: str | os.PathLike[str] | None = None) -> Path:
     """The absolute, resolved directory the agent is allowed to touch.
 
-    Precedence: explicit override > WORKSPACE_DIR env var > <project>/playground
-
-    The default is anchored to the project root, NOT the current working
-    directory. A relative default would make the workspace depend on where the
-    process was launched from: running the CLI from ~ would silently point at
-    ~/playground, which resolve() returns without complaint because it does not
-    check existence. That reads as a boundary bug in step 4 but is really a
-    config bug here.
+    Precedence: explicit override > WORKSPACE_DIR env var. A fresh run must
+    select a workspace; silently treating the agent's own checkout as writable
+    would expose its configuration and local state to file tools.
 
     A relative path given EXPLICITLY (override or WORKSPACE_DIR) still resolves
     against the cwd - that is the normal convention for user-supplied config.
 
-    D1: resolved on every call instead of cached in a module-level constant.
-    A global would be one line shorter today and a rewrite in Session 13, where
-    each concurrent run needs its own workspace - that run passes `override`.
-
-    D2: `.resolve()`, not `normpath`. It follows symlinks, which is what makes
-    the comparison in later steps meaningful. It also fixes the macOS
-    /var -> /private/var mismatch that would otherwise break every test.
+    `.resolve()` follows symlinks so containment checks compare canonical paths.
     """
-    raw = override or os.getenv("WORKSPACE_DIR") or DEFAULT_WORKSPACE
+    raw = override or os.getenv("WORKSPACE_DIR")
+    if not raw:
+        raise ValueError("choose a workspace with --workspace=DIR or WORKSPACE_DIR")
     return Path(raw).expanduser().resolve()
 
 

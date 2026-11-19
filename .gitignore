@@ -1,23 +1,19 @@
+# Local configuration and installs
 .env
 .venv/
+*.egg-info/
+build/
+dist/
+
+# Agent state and prior local experiment data
+.runtime/
+.local-state/
+traces/
+*.jsonl
+
+# Python and editor caches
 __pycache__/
 *.py[cod]
 .pytest_cache/
 .idea/
 .DS_Store
-
-# Run artifacts
-.runtime/
-.local-state/
-evals/results/*
-!evals/results/.gitkeep
-!evals/results/session-12-live-complete.jsonl
-traces/
-*.jsonl
-!evals/results/session-14-memory-paired.jsonl
-
-# Session 2 fixtures - regenerate with scripts/make_fixtures.py.
-# Never commit: contains symlinks pointing outside the repo.
-playground/*
-!playground/.gitkeep
-playground-evil/

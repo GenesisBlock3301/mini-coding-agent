@@ -51,7 +51,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable
 
-from dotenv import load_dotenv
+from agent.config import load_config
 
 from agent.budget import Budget, Pricing
 from agent.cli import (
@@ -89,7 +89,7 @@ CONTEXT_WARN_FRACTION = 0.8
 RESUME_FLAG = "--resume="
 CONTINUE_FLAG = "--continue"
 USAGE = (
-    "usage: python -m agent.chat [--resume=<session_id> | --continue] [--workspace=DIR]\n"
+    "usage: mini-agent-chat [--resume=<session_id> | --continue] [--workspace=DIR]\n"
     "\nSession limits come from .env: MAX_SESSION_TOKENS, MAX_SESSION_SPEND\n"
     "(needs PRICE_*), MAX_CONTEXT_TOKENS. Per-turn limits are the usual\n"
     "MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS."
@@ -955,7 +955,11 @@ def main(
     `read_line=None` means "decide at runtime": a terminal gets the menu, a
     pipe gets `input()`, and a test gets whatever it passed.
     """
-    load_dotenv()
+    load_config()
+
+    if argv and ("--help" in argv[1:] or "-h" in argv[1:]):
+        print(USAGE)
+        return 0
 
     resume_id, selected_workspace, ok = _parse_resume_flag(argv)
     if not ok:
@@ -982,8 +986,17 @@ def main(
     # retry policy the two entry points disagree about is two agents.
     retry = RetryPolicy.from_env()
 
-    root = workspace_root(selected_workspace)
+    if resume_id not in (None, CONTINUE_FLAG) and selected_workspace is None:
+        # An explicit resume gets its root from the journal, not cwd or env.
+        root = None
+    else:
+        try:
+            root = workspace_root(selected_workspace)
+        except ValueError as exc:
+            print(f"error [workspace]: {exc}", file=sys.stderr)
+            return 2
     if resume_id == CONTINUE_FLAG:
+        assert root is not None
         resume_id = latest_session(root)
         if resume_id is None:
             print("error [no_journal]: no session for this workspace", file=sys.stderr)
@@ -1000,7 +1013,12 @@ def main(
         if selected_workspace is not None and root != recorded:
             print("error [workspace]: --workspace conflicts with the journal", file=sys.stderr)
             return 2
-        root = recorded
+        try:
+            root = workspace_root(recorded)
+        except ValueError as exc:
+            print(f"error [workspace]: {exc}", file=sys.stderr)
+            return 2
+    assert root is not None
     if not root.is_dir():
         print(f"error [workspace]: {root} is missing", file=sys.stderr)
         return 2
@@ -1020,5 +1038,10 @@ def main(
     return 0
 
 
+def console_main() -> int:
+    """Entry point installed as the ``mini-agent-chat`` command."""
+    return main(sys.argv)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv))
+    raise SystemExit(console_main())

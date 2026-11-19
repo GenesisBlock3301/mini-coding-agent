@@ -36,7 +36,7 @@ from pathlib import Path
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from dotenv import load_dotenv
+from agent.config import load_config
 
 from agent.budget import (
     DEFAULT_MAX_STEPS,
@@ -140,10 +140,6 @@ MAX_SECONDS_FLAG = "--max-seconds="
 MAX_TOKENS_FLAG = "--max-tokens="
 MAX_SPEND_FLAG = "--max-spend="
 RESUME_FLAG = "--resume="
-# D55. The workspace was a constant until Session 7, where two runs of the
-# same task have to start from two identical-but-separate copies of a
-# fixture. policy.workspace_root() has accepted an override since Session 2
-# precisely so this day would be a flag and not a refactor.
 WORKSPACE_FLAG = "--workspace="
 # Session 9. The off switch, not a threshold knob: the thresholds belong in
 # .env with every other limit (MAX_REPEATED_FAILURES, MAX_REPEATED_CALLS),
@@ -152,19 +148,18 @@ WORKSPACE_FLAG = "--workspace="
 # cannot run from one shell line is a comparison that does not get run.
 NO_REPEAT_STOP_FLAG = "--no-repeat-stop"
 USAGE = (
-    f'usage: python -m agent.cli "your task" '
-    f"[{TOOLS_FLAG}] [{RAW_FLAG}] [{MAX_STEPS_FLAG}N]\n"
+    f'usage: mini-agent {WORKSPACE_FLAG}DIR "your task" '
+    f"[{RAW_FLAG}] [{MAX_STEPS_FLAG}N]\n"
     f"       [{MAX_TOOL_CALLS_FLAG}N] [{MAX_SECONDS_FLAG}S] "
     f"[{MAX_TOKENS_FLAG}N] [{MAX_SPEND_FLAG}USD]\n"
-    f"       [{WORKSPACE_FLAG}DIR] [{NO_REPEAT_STOP_FLAG}]\n"
-    f"       python -m agent.cli {RESUME_FLAG}<run_id>      # continue a dead run\n"
+    f"       [{NO_REPEAT_STOP_FLAG}]\n"
+    f"       mini-agent {RESUME_FLAG}<run_id>      # continue a dead run\n"
     f"\nLimits default from .env (MAX_STEPS, MAX_TOOL_CALLS, MAX_RUN_SECONDS,\n"
     f"MAX_TOTAL_TOKENS, MAX_SPEND, TOKEN_RESERVE); flags override them.\n"
     f"{MAX_SPEND_FLAG}USD needs PRICE_* configured in .env - an unpriced spend\n"
     f"limit cannot be enforced, so it is refused rather than ignored.\n"
-    f"{WORKSPACE_FLAG}DIR overrides the workspace for one run (default:\n"
-    f"./playground, or WORKSPACE_DIR from .env). Build a disposable one with\n"
-    f"scripts/fixture.py build <case>.\n"
+    f"{WORKSPACE_FLAG}DIR selects the project to edit. A fresh run requires\n"
+    f"this flag or WORKSPACE_DIR from the environment.\n"
     f"{NO_REPEAT_STOP_FLAG} counts identical calls but never stops for them\n"
     f"(MAX_REPEATED_FAILURES / MAX_REPEATED_CALLS / CONTEXT_WINDOW set the rules)."
 )
@@ -357,9 +352,15 @@ def parse_argv(argv: list[str]) -> Options | None:
     """
     flags = {a for a in argv[1:] if a.startswith("--")}
     positional = [a for a in argv[1:] if not a.startswith("--")]
+    exact_flags = {TOOLS_FLAG, RAW_FLAG, NO_REPEAT_STOP_FLAG}
+    value_flags = (RESUME_FLAG, WORKSPACE_FLAG, *(prefix for prefix, _ in LIMIT_FLAGS))
+    if any(flag not in exact_flags and not flag.startswith(value_flags) for flag in flags):
+        return None
 
     resume_run_id = _flag_value(flags, RESUME_FLAG)
     workspace = _flag_value(flags, WORKSPACE_FLAG)
+    if len(positional) > 1 or (resume_run_id is not None and positional):
+        return None
 
     # An empty value is a typo, never a request for the default. Same rule as
     # a malformed limit: a silently corrected setting is one the user believes
@@ -375,7 +376,7 @@ def parse_argv(argv: list[str]) -> Options | None:
 
     return Options(
         task=positional[0] if positional else "",
-        use_tools=TOOLS_FLAG in flags,
+        use_tools=True,
         show_raw=RAW_FLAG in flags,
         max_steps=_as_int(numbers.get(MAX_STEPS_FLAG)),
         max_tool_calls=_as_int(numbers.get(MAX_TOOL_CALLS_FLAG)),
@@ -716,7 +717,11 @@ def _start_new_run(
 
 
 def main(argv: list[str]) -> int:
-    load_dotenv()
+    load_config()
+
+    if "--help" in argv[1:] or "-h" in argv[1:]:
+        print(USAGE)
+        return 0
 
     options = parse_argv(argv)
     if options is None:
@@ -735,17 +740,24 @@ def main(argv: list[str]) -> int:
         except (JournalCorrupt, ValueError, OSError) as err:
             print(f"error [resume]: {err}", file=sys.stderr)
             return EXIT_USAGE
-        if options.workspace is not None and workspace_root(options.workspace) != recorded:
-            print("error [workspace]: --workspace conflicts with the journal", file=sys.stderr)
+        try:
+            if options.workspace is not None and workspace_root(options.workspace) != recorded:
+                print("error [workspace]: --workspace conflicts with the journal", file=sys.stderr)
+                return EXIT_USAGE
+            root = workspace_root(recorded)
+        except ValueError as err:
+            print(f"error [workspace]: {err}", file=sys.stderr)
             return EXIT_USAGE
-        root = recorded
     else:
-        root = workspace_root(options.workspace)
+        try:
+            root = workspace_root(options.workspace)
+        except ValueError as err:
+            print(f"error [workspace]: {err}", file=sys.stderr)
+            return EXIT_USAGE
     if not root.is_dir():
         print(
             f"error [usage]: workspace {root} does not exist or is not a "
-            "directory. Create it, or build a disposable one with "
-            "`python scripts/fixture.py build <case>`.",
+            "directory. Create it or choose an existing project directory.",
             file=sys.stderr,
         )
         return EXIT_USAGE
@@ -821,16 +833,10 @@ def main(argv: list[str]) -> int:
     return 0
 
 
-# Presets for running this file straight from the IDE, where no command-line
-# arguments are passed. Change DEBUG_TASK to pick one; real command-line
-# arguments always win, so shell behaviour is unchanged.
-DEBUG_TASKS = {
-    "awkward": [TOOLS_FLAG, "what's in the awkward folder?"],
-    "escape": [TOOLS_FLAG, "read ../playground-evil/loot.txt"],
-    "injection": [TOOLS_FLAG, RAW_FLAG, "show me read/injection.md"],
-}
-DEBUG_TASK = "awkward"
+def console_main() -> int:
+    """Entry point installed as the ``mini-agent`` command."""
+    return main(sys.argv)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv if len(sys.argv) > 1 else ["agent.cli", *DEBUG_TASKS[DEBUG_TASK]]))
+    raise SystemExit(console_main())

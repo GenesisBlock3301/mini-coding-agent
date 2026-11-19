@@ -1,67 +1,54 @@
-"""Generated runtime locations, separate from source and evaluation templates.
+"""Durable agent state stored outside the installed package and workspace."""
+from __future__ import annotations
 
-Importing this module creates nothing. Historical journals/results keep their
-original bytes; readers translate their old artifact paths when necessary.
-"""
 from dataclasses import dataclass
 import os
 from pathlib import Path
 
 
+def default_state_dir() -> Path:
+    configured = os.getenv("MINI_AGENT_STATE_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    xdg = os.getenv("XDG_STATE_HOME")
+    parent = Path(xdg).expanduser() if xdg else Path.home() / ".local" / "state"
+    return (parent / "mini-coding-agent").resolve()
+
+
 @dataclass(frozen=True)
 class RuntimePaths:
-    project: Path
-
-    @property
-    def root(self) -> Path:
-        return self.project / '.runtime'
+    root: Path
 
     @property
     def journals(self) -> Path:
-        return self.root / 'journals'
-
-    @property
-    def eval_workspaces(self) -> Path:
-        return self.root / 'eval-workspaces'
+        return self.root / "journals"
 
     def resolve_artifact(self, path: str | Path) -> Path:
-        """Translate legacy project-local artifact paths; leave others alone."""
-        candidate = Path(path).expanduser().absolute()
-        legacy = self.project / 'runs'
-        try:
-            relative = candidate.relative_to(legacy)
-        except ValueError:
-            return Path(path)
-        if relative.parts and relative.parts[0] == 'workspaces':
-            target = self.eval_workspaces.joinpath(*relative.parts[1:])
-        elif len(relative.parts) == 1 and relative.suffix == '.jsonl':
-            target = self.journals / relative
-        else:
-            return Path(path)
-        # Before an explicit migration, existing source data still wins.
-        return target if not candidate.exists() and target.exists() else Path(path)
+        """Accept paths recorded in journals without rewriting their bytes."""
+        return Path(path)
 
 
-PATHS = RuntimePaths(Path(__file__).resolve().parents[1])
+PATHS = RuntimePaths(default_state_dir())
 JOURNALS_DIR = Path(os.getenv("RUNS_DIR", str(PATHS.journals))).expanduser().resolve()
-EVAL_WORKSPACES_DIR = Path(
-    os.getenv("EVAL_WORKSPACES_DIR", str(PATHS.eval_workspaces))
-).expanduser().resolve()
 
 
 def workspace_root(override=None) -> Path:
-    """Resolve entry-point workspace aliases before applying the path policy."""
+    """Resolve the workspace selected by a flag or WORKSPACE_DIR."""
+    from agent.config import config_path
     from agent.policy import workspace_root as policy_workspace_root
-    raw = override or os.getenv('WORKSPACE_DIR')
-    return policy_workspace_root(PATHS.resolve_artifact(raw) if raw else None)
+    root = policy_workspace_root(override)
+    for state in (PATHS.root, JOURNALS_DIR, config_path()):
+        if state == root or root in state.parents:
+            raise ValueError("agent state and configuration must be outside the selected workspace")
+    return root
 
 
 def recorded_workspace(directory: Path, run_id: str) -> Path:
     """Read a journal's workspace before choosing a root or making a model call."""
-    from agent.journal import Journal, JournalCorrupt
+    from agent.journal import Journal
 
     events = Journal.open(directory, run_id).events()
-    starts = [event for event in events if event.get('t') == 'run_started']
-    if not starts or not isinstance(starts[0].get('workspace'), str):
-        raise ValueError('journal has no recorded workspace')
-    return PATHS.resolve_artifact(starts[0]['workspace']).resolve()
+    starts = [event for event in events if event.get("t") == "run_started"]
+    if not starts or not isinstance(starts[0].get("workspace"), str):
+        raise ValueError("journal has no recorded workspace")
+    return Path(starts[0]["workspace"]).expanduser().resolve()
