@@ -13,18 +13,14 @@ from pathlib import Path
 def workspace_root(override: str | os.PathLike[str] | None = None) -> Path:
     """The absolute, resolved directory the agent is allowed to touch.
 
-    Precedence: explicit override > WORKSPACE_DIR env var. A fresh run must
-    select a workspace; silently treating the agent's own checkout as writable
-    would expose its configuration and local state to file tools.
+    Precedence: explicit override > WORKSPACE_DIR environment variable > cwd.
 
     A relative path given EXPLICITLY (override or WORKSPACE_DIR) still resolves
     against the cwd - that is the normal convention for user-supplied config.
 
     `.resolve()` follows symlinks so containment checks compare canonical paths.
     """
-    raw = override or os.getenv("WORKSPACE_DIR")
-    if not raw:
-        raise ValueError("choose a workspace with --workspace=DIR or WORKSPACE_DIR")
+    raw = override or os.getenv("WORKSPACE_DIR") or os.getcwd()
     return Path(raw).expanduser().resolve()
 
 
@@ -132,6 +128,13 @@ def resolve_in_workspace(path: str | os.PathLike[str], *, root: Path) -> Path:
             "absolute_path",
             f"{echo_path(path)} is an absolute path. Paths must be relative to the "
             "workspace root, e.g. 'src/app.py'.",
+        )
+
+    name = Path(path).name
+    if name == ".env" or name.startswith(".env."):
+        raise PolicyViolation(
+            "protected_file",
+            f"{echo_path(path)} is a protected environment file and cannot be accessed.",
         )
 
     # The root is resolved defensively. The comparison below is only meaningful

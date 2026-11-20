@@ -106,10 +106,18 @@ SYSTEM_PROMPT = "You are a terse assistant."
 # presents 200 of 5000 names as the answer is worse than one that refused -
 # the user cannot see the cap, only the list.
 TOOLS_SYSTEM_PROMPT = (
-    "You are a terse coding assistant with five tools: list_files, "
-    "list_folders, read_file, replace_text and write_file. All paths are relative to a "
-    "workspace root - never absolute, never outside it. Call a tool when the "
-    "answer depends on what is actually on disk. "
+    "You are a terse coding assistant with six tools: list_files, "
+    "list_folders, read_file, replace_text, write_file and run_python. File "
+    "tool paths are relative to the workspace root - never absolute or outside it. "
+    "Use run_python only when the user explicitly asks to run or test a Python script. "
+    "It executes code with the current user's permissions; run only trusted workspace code. "
+    "Call a tool when the "
+    "answer depends on what is actually on disk. Before each call, check that "
+    "the requested result cannot already be provided from the conversation or "
+    "from an earlier tool result. Choose only tools needed for the user's "
+    "specific request; do not inspect files when the user asks only about "
+    "folders, or inspect folders when the user asks only about a named file. "
+    "After a tool result answers the request, stop calling tools and respond. "
     "When the user names a file or folder, treat that name as a "
     "workspace-relative path and call the tool on it directly - do not list "
     "the root first to go looking for it. Only list a parent directory if "
@@ -148,7 +156,7 @@ WORKSPACE_FLAG = "--workspace="
 # cannot run from one shell line is a comparison that does not get run.
 NO_REPEAT_STOP_FLAG = "--no-repeat-stop"
 USAGE = (
-    f'usage: mini-agent {WORKSPACE_FLAG}DIR "your task" '
+    f'usage: mini-agent [{WORKSPACE_FLAG}DIR] "your task" '
     f"[{RAW_FLAG}] [{MAX_STEPS_FLAG}N]\n"
     f"       [{MAX_TOOL_CALLS_FLAG}N] [{MAX_SECONDS_FLAG}S] "
     f"[{MAX_TOKENS_FLAG}N] [{MAX_SPEND_FLAG}USD]\n"
@@ -158,8 +166,8 @@ USAGE = (
     f"MAX_TOTAL_TOKENS, MAX_SPEND, TOKEN_RESERVE); flags override them.\n"
     f"{MAX_SPEND_FLAG}USD needs PRICE_* configured in .env - an unpriced spend\n"
     f"limit cannot be enforced, so it is refused rather than ignored.\n"
-    f"{WORKSPACE_FLAG}DIR selects the project to edit. A fresh run requires\n"
-    f"this flag or WORKSPACE_DIR from the environment.\n"
+    f"{WORKSPACE_FLAG}DIR selects the project to edit. By default, a fresh\n"
+    f"run uses the current directory; WORKSPACE_DIR also sets the default.\n"
     f"{NO_REPEAT_STOP_FLAG} counts identical calls but never stops for them\n"
     f"(MAX_REPEATED_FAILURES / MAX_REPEATED_CALLS / CONTEXT_WINDOW set the rules)."
 )

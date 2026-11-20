@@ -10,7 +10,7 @@ Requires Python 3.12 or newer. From a checkout of this branch:
 python3.12 -m venv .venv
 . .venv/bin/activate
 pip install .
-mini-agent --workspace=/path/to/project "Explain the code in src/app.py"
+mini-agent "Explain the code in src/app.py"
 ```
 
 `pipx install .` is another option if you use pipx. The installable package contains only `agent/`. The repository keeps `docs/`, while fixture projects, evaluation outputs, and the old test harness are removed from this branch.
@@ -30,19 +30,20 @@ Edit that file to set `DEEPSEEK_APIKEY`. For a local model, set `PROVIDER=ollama
 
 If you install directly from a package without a source checkout, create the same config file with an editor and add `PROVIDER=deepseek` and your `DEEPSEEK_APIKEY`. The command does not need to run from this repository.
 
-A fresh run requires `--workspace=DIR` or `WORKSPACE_DIR`. Select a project directory that exists. The agent refuses a workspace containing its state or config, so it cannot edit its own journal or credentials through file tools.
+A fresh run uses the current directory as its workspace. Run the command from the project you want to edit, or choose another directory with `--workspace=DIR` or `WORKSPACE_DIR`. The agent refuses a workspace containing its state or config, so it cannot edit its own journal or credentials through file tools.
 
 ## Use
 
 ```bash
+mini-agent "Fix the bug in src/app.py"       # edits the current directory
 mini-agent --workspace=/path/to/project "Fix the bug in src/app.py"
 mini-agent --resume=<run_id>                 # uses the workspace recorded in the journal
-mini-agent-chat --workspace=/path/to/project # interactive conversation
-mini-agent-chat --workspace=/path/to/project --continue
+mini-agent-chat                              # interactive conversation in the current directory
+mini-agent-chat --continue                   # latest session for this workspace
 mini-agent --help
 ```
 
-The agent offers `list_files`, `list_folders`, `read_file`, `replace_text`, and create-only `write_file`. It prints the selected workspace, model, budget, journal ID, tool results, and changed paths. Check the files yourself after a run; the final answer is the model's account of its work.
+The agent offers `list_files`, `list_folders`, `read_file`, `replace_text`, create-only `write_file`, and `run_python`. `run_python` accepts one workspace-relative `.py` file, runs it with the current Python interpreter for at most 30 seconds, and returns at most 8,000 bytes of output. Python code runs with the agent user's operating-system permissions and can access files or network resources beyond the workspace; use it only with trusted code. An interrupted execution is never automatically repeated. The agent prints the selected workspace, model, budget, journal ID, tool results, and changed paths. Check files yourself after a run; the final answer is the model's account of its work.
 
 By default journals and human-approved memory live under `~/.local/state/mini-coding-agent/`, outside the installed package and selected workspace. `MINI_AGENT_STATE_DIR` moves both; `RUNS_DIR` and `MINI_AGENT_MEMORY_DIR` can override them separately. `python -m agent.tracing <run_id>` shows a bounded timeline. In chat, `/remember <exact earlier user statement>` proposes a note and `/approve-memory` saves it for the next session. The startup banner prints the memory path and hash.
 
@@ -64,4 +65,4 @@ Replace `/absolute/path/to/project` with an existing directory. Reuse the same m
 
 ## Limits
 
-The tools are restricted to the selected workspace and cannot execute commands, install packages, browse, or run tests. Path checks and Docker do not make hostile code safe: another process that can alter the workspace can defeat the path checks. Run the agent first on a disposable project, then inspect diffs and run your own tests before keeping changes.
+File tools are restricted to the selected workspace. The Python execution tool runs trusted scripts without a shell, but it is not a security sandbox and does not restrict a script's filesystem or network access. The agent does not install packages or browse. Another process that can alter the workspace can also defeat path checks. Use disposable projects for unfamiliar code and inspect changes after execution.

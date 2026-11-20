@@ -19,4 +19,4 @@ mini-agent = "agent.cli:console_main"
 mini-agent-chat = "agent.chat:console_main"
 
 [tool.setuptools]
-packages = ["agent"]
+packages = ["agent", "agent.tools"]

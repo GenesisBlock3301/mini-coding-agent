@@ -49,6 +49,7 @@ import os
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from dotenv import load_dotenv
 from typing import Any, Callable
 
 from agent.config import load_config
@@ -712,8 +713,13 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
         )
         return
 
-    if result.text is not None:
+    if result.text is not None and result.text.strip():
         print(result.text)
+    elif result.stop_reason == "answer":
+        print(
+            "No final response text was returned by the model. Please try the question again.",
+            file=sys.stderr,
+        )
 
 
 def _parse_resume_flag(argv: list[str] | None) -> tuple[str | None, str | None, bool]:
@@ -966,6 +972,20 @@ def main(
         print(USAGE, file=sys.stderr)
         return 2
 
+    if resume_id is None and selected_workspace is None and not os.getenv("WORKSPACE_DIR"):
+        try:
+            selected_workspace = input("Workspace directory (absolute path): ").strip()
+        except (EOFError, OSError):
+            selected_workspace = ""
+        if not selected_workspace:
+            print("error [workspace]: choose a workspace directory to start chat", file=sys.stderr)
+            return 2
+        chosen_root = Path(selected_workspace).expanduser().resolve()
+        if not chosen_root.is_dir():
+            print("error [workspace]: directory does not exist", file=sys.stderr)
+            return 2
+        selected_workspace = str(chosen_root)
+
     try:
         provider = active_provider()
     except ModelError as err:
@@ -1022,6 +1042,9 @@ def main(
     if not root.is_dir():
         print(f"error [workspace]: {root} is missing", file=sys.stderr)
         return 2
+    workspace_env = root / ".env"
+    if workspace_env.is_file() and not workspace_env.is_symlink():
+        load_dotenv(workspace_env, override=False)
     try:
         session = start_session(turn_limits, root, resume_id, retry)
     except (ValueError, OSError, UnicodeError) as exc:

@@ -33,7 +33,7 @@ JOURNALS_DIR = Path(os.getenv("RUNS_DIR", str(PATHS.journals))).expanduser().res
 
 
 def workspace_root(override=None) -> Path:
-    """Resolve the workspace selected by a flag or WORKSPACE_DIR."""
+    """Resolve the workspace from a flag, environment, or current directory."""
     from agent.config import config_path
     from agent.policy import workspace_root as policy_workspace_root
     root = policy_workspace_root(override)
