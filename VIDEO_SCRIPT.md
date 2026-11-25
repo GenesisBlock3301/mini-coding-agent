@@ -172,7 +172,7 @@ Use a disposable fixture project, never a real one. Never show the `.env`.
 **Takeaway:** decide how you will judge it before you look at the numbers.
 **Source:** `docs/session-11.md`, `session-12.md`, `session-14.md`, `docs/session-14-step8-audit.md`.
 
-**Where the files are:** `evals/`, `fixtures/` and `scripts/` live on the `main` branch, not on `agent-only-app`. Show them from `main`.
+**Where the files are:** `evals/`, `fixtures/` and most `scripts/` are no longer on `main`. They live at the git tag `main-with-evals`. Check that tag out for this video, and tell viewers the packaged agent leaves them out.
 **Say carefully:** the audit is a sanity check (one model, 5 cases, 3 repeats). Long-run poisoning with agent-written memory is untested because that write path does not exist.
 
 ---

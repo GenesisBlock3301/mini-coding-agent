@@ -62,10 +62,14 @@ Two tools, two guarantees. Do not call them the same thing.
 
 ## Topics 12–13 — where the evals live
 
-The `agent-only-app` branch contains only `agent/`, `tests/` and `docs/`.
-`evals/`, `fixtures/` and the runner scripts live on `main`. For the evaluation
-chapter, show them from `main`, or say clearly that the packaged agent
-excludes them.
+`main` now holds only the packaged agent (`agent/`, `tests/`, `docs/`, plus
+`scripts/make_fixtures.py` for the tool tests). `evals/`, `fixtures/` and the
+other runner scripts were removed from the files but are kept in history at the
+tag **`main-with-evals`**. For the evaluation chapter, check out that tag
+(`git checkout main-with-evals`) or browse it on GitHub, and say plainly that
+the packaged agent excludes them. Five test files need that material and are
+ignored on `main`: `test_compare`, `test_evals`, `test_fixture`, `test_prune`
+and `test_storage` (126 tests, passing on the tag).
 
 ## Topic 13 — report the null result as a result
 
