@@ -32,6 +32,8 @@ If you install directly from a package without a source checkout, create the sam
 
 A fresh run uses the current directory as its workspace. Run the command from the project you want to edit, or choose another directory with `--workspace=DIR` or `WORKSPACE_DIR`. The agent refuses a workspace containing its state or config, so it cannot edit its own journal or credentials through file tools.
 
+The first time `mini-chat` opens a folder it asks "Do you trust the files in this folder?" and remembers a yes in `trusted-workspaces.json` under the state directory (outside the workspace). Trusting a folder covers its subfolders. Your home directory and filesystem roots are refused when you reach them by `cd`, and are asked about every time, never remembered, when you pass `--workspace`. Without a terminal an untrusted folder is refused.
+
 ## Use
 
 ```bash
@@ -46,22 +48,6 @@ mini-agent --help
 The agent offers `list_files`, `list_folders`, `read_file`, `replace_text`, create-only `write_file`, and `run_python`. `run_python` accepts one workspace-relative `.py` file, runs it with the current Python interpreter for at most 30 seconds, and returns at most 8,000 bytes of output. Python code runs with the agent user's operating-system permissions and can access files or network resources beyond the workspace; use it only with trusted code. An interrupted execution is never automatically repeated. The agent prints the selected workspace, model, budget, journal ID, tool results, and changed paths. Check files yourself after a run; the final answer is the model's account of its work.
 
 By default journals and human-approved memory live under `~/.local/state/mini-coding-agent/`, outside the installed package and selected workspace. `MINI_AGENT_STATE_DIR` moves both; `RUNS_DIR` and `MINI_AGENT_MEMORY_DIR` can override them separately. `python -m agent.tracing <run_id>` shows a bounded timeline. In chat, `/remember <exact earlier user statement>` proposes a note and `/approve-memory` saves it for the next session. The startup banner prints the memory path and hash.
-
-## Docker
-
-The image contains the installed agent, not example projects or test data. Build it locally:
-
-```bash
-docker build -t mini-coding-agent .
-mkdir -p "$HOME/.local/state/mini-coding-agent"
-docker run --rm -it --user "$(id -u):$(id -g)" \
-  --env-file "$HOME/.config/mini-coding-agent/.env" \
-  --mount type=bind,src="/absolute/path/to/project",dst=/workspace \
-  --mount type=bind,src="$HOME/.local/state/mini-coding-agent",dst=/state \
-  mini-coding-agent "Explain src/app.py"
-```
-
-Replace `/absolute/path/to/project` with an existing directory. Reuse the same mounts and pass `--resume=<run_id>` after replacing a container. For host Ollama, set `OLLAMA_BASE_URL=http://host.docker.internal:11434/v1` in the runtime environment. If bind-mount permissions differ on your system, use a UID and GID with write access to the project and state directories.
 
 ## Limits
 

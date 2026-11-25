@@ -8,6 +8,7 @@ scripted model.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +16,8 @@ from agent.budget import Budget, Pricing
 from agent.chat import Session, answer_unfinished_calls, main
 from agent.journal import Journal
 from agent.model import ModelError, ModelResponse
-from agent.policy import DEFAULT_WORKSPACE
+
+DEFAULT_WORKSPACE = Path.cwd()  # a dummy root for hand-built Sessions
 
 PRICES = Pricing(
     input_cache_hit_per_m=0.07, input_cache_miss_per_m=0.27, output_per_m=1.10

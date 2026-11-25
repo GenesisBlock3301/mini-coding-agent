@@ -66,6 +66,7 @@ from agent.cli import (
 )
 from agent.journal import Journal, JournalCorrupt, new_run_id, rebuild
 from agent.loop import LoopResult, run_loop, tool_message
+from agent.trust import ensure_trusted
 from agent.model import ModelConfig, ModelError, active_provider, call_model, context_warning
 from agent.storage import workspace_root, recorded_workspace
 from agent.retry import RetryPolicy
@@ -972,20 +973,6 @@ def main(
         print(USAGE, file=sys.stderr)
         return 2
 
-    if resume_id is None and selected_workspace is None and not os.getenv("WORKSPACE_DIR"):
-        try:
-            selected_workspace = input("Workspace directory (absolute path): ").strip()
-        except (EOFError, OSError):
-            selected_workspace = ""
-        if not selected_workspace:
-            print("error [workspace]: choose a workspace directory to start chat", file=sys.stderr)
-            return 2
-        chosen_root = Path(selected_workspace).expanduser().resolve()
-        if not chosen_root.is_dir():
-            print("error [workspace]: directory does not exist", file=sys.stderr)
-            return 2
-        selected_workspace = str(chosen_root)
-
     try:
         provider = active_provider()
     except ModelError as err:
@@ -1041,6 +1028,8 @@ def main(
     assert root is not None
     if not root.is_dir():
         print(f"error [workspace]: {root} is missing", file=sys.stderr)
+        return 2
+    if not ensure_trusted(root, explicit=selected_workspace is not None or resume_id is not None):
         return 2
     workspace_env = root / ".env"
     if workspace_env.is_file() and not workspace_env.is_symlink():
