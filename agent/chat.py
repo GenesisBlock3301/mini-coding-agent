@@ -820,8 +820,7 @@ def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
         print(f"warning: {warning}", file=sys.stderr)
 
     print(file=sys.stderr)
-    print(help_text(), file=sys.stderr)
-    print("type / for the menu. /quit or Ctrl-D to end.", file=sys.stderr)
+    print("type / to pick a command. /help lists them. /quit or Ctrl-D to end.", file=sys.stderr)
 
 
 def _command_completer():

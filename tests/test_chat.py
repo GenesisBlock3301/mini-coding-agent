@@ -704,7 +704,7 @@ def test_a_bare_prefix_prints_the_list_instead_of_asking_the_model(capsys):
 
     assert model.seen == []
     err = capsys.readouterr().err
-    assert err.count("current session metrics") == 3   # banner + 2
+    assert err.count("current session metrics") == 2   # the banner no longer lists commands
 
 
 def test_an_unknown_command_prints_the_list_not_a_pointer_to_it(capsys):
