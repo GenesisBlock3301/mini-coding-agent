@@ -1,5 +1,7 @@
 # Session 13 — Create a File in the Selected Workspace
 
+> **Note (2026-11-25):** written before `run_python` was added. Statements here that the agent has no command or code execution describe the project at that time. See [`run-python-addendum.md`](run-python-addendum.md).
+
 **Goal:** let the local coding agent create a new text file in its selected workspace.
 
 **Status: implemented.** The agent can create a file through the one-shot CLI or interactive chat and recover safely if the process stops before the result is journalled. An existing file is never overwritten by this tool.

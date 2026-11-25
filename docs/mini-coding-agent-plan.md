@@ -1,5 +1,7 @@
 # Mini Coding Agent: Applied AI and AI Engineering Practice Plan
 
+> **Note (2026-11-25):** written before `run_python` was added. Statements here that the agent has no command or code execution describe the project at that time. See [`run-python-addendum.md`](run-python-addendum.md).
+
 ## Goal
 
 Build a small coding agent from scratch using Python and the DeepSeek API. Understand how an agent chooses actions, where it fails, and whether a change actually improves its performance.

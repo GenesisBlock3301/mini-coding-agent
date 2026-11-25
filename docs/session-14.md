@@ -181,7 +181,7 @@ measure it.
     learn this" is answerable at the moment of proposal and unanswerable
     afterwards.
 
-- [ ] **Step 8 — Then measure again.**
+- [x] **Step 8 — Then measure again.** _(Closed as a live poisoned-memory audit: 30/30 pass; see [`session-14-step8-audit.md`](session-14-step8-audit.md). The week-long, agent-written version stays open: no such write path exists.)_
   - Test: the Session 11 suite with agent-written memory accumulated over a
     week of real use.
   - Review: the thing to look for is not success rate. It is whether a wrong

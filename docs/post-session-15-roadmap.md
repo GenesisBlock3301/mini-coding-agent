@@ -1,5 +1,7 @@
 # Post-Session-15 Roadmap — a local-first interactive coding assistant
 
+> **Note (2026-11-25):** written before `run_python` was added. Statements here that the agent has no command or code execution describe the project at that time. See [`run-python-addendum.md`](run-python-addendum.md).
+
 > **STATUS: PLANNED — NOT IMPLEMENTED.**
 > Every capability in this document is a proposal. None of it is built, none of
 > it is started, and nothing here changes `agent/`, `evals/`, `scripts/` or
