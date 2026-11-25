@@ -60,6 +60,13 @@ Two tools, two guarantees. Do not call them the same thing.
 - The session docs and `post-session-15-roadmap.md` predate `run_python` and
   still say "no command execution". The README and code are current.
 
+## Verification — `run_tests`
+
+- Say: **"after every change the agent is told to run the whole test suite, and
+  if it doesn't, the run ends with a warning."** Do not say it is forced.
+- unittest only; no pytest. No tests found counts as failure.
+- Demo: practice task 2, then watch `run_tests` return 7 tests OK.
+
 ## Topics 12–13 — where the evals live
 
 `main` now holds only the packaged agent (`agent/`, `tests/`, `docs/`, plus

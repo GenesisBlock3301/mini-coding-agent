@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import MAX_CREATE_BYTES, ToolResult, _tool_error
-from .execution import run_python
+from .execution import run_python, run_tests
 from .filesystem import list_files, list_folders, read_file, replace_text, write_file
 
 # --------------------------------------------------------------------------
@@ -169,6 +169,19 @@ TOOL_SCHEMAS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_tests",
+            "description": (
+                "Run the workspace's whole unittest suite (python -m unittest discover, "
+                "starting in tests/ if it exists). Takes no arguments. Call it after every "
+                "change you make, and report whether it passed. Finding no tests is a "
+                "failure to verify, not a pass. Limited to 30 seconds."
+            ),
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
 ]
 
 TOOLS = {
@@ -178,6 +191,7 @@ TOOLS = {
     "replace_text": replace_text,
     "write_file": write_file,
     "run_python": run_python,
+    "run_tests": run_tests,
 }
 
 # Session 8, D73. Which of those tools can change the workspace.

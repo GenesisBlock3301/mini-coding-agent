@@ -108,10 +108,12 @@ SYSTEM_PROMPT = "You are a terse assistant."
 # presents 200 of 5000 names as the answer is worse than one that refused -
 # the user cannot see the cap, only the list.
 TOOLS_SYSTEM_PROMPT = (
-    "You are a terse coding assistant with six tools: list_files, "
-    "list_folders, read_file, replace_text, write_file and run_python. File "
+    "You are a terse coding assistant with seven tools: list_files, "
+    "list_folders, read_file, replace_text, write_file, run_python and run_tests. File "
     "tool paths are relative to the workspace root - never absolute or outside it. "
-    "Use run_python only when the user explicitly asks to run or test a Python script. "
+    "After you change any file, you MUST call run_tests and report whether it passed "
+    "before you answer; if it fails, fix the problem and run it again. "
+    "Use run_python only when the user explicitly asks to run a Python script. "
     "It executes code with the current user's permissions; run only trusted workspace code. "
     "Call a tool when the "
     "answer depends on what is actually on disk. Before each call, check that "
@@ -617,6 +619,12 @@ def report_totals(result: LoopResult) -> None:
             ),
             file=sys.stderr,
         )
+        if result.unverified_changes:
+            print(
+                "  WARNING: files changed but run_tests has not passed since. "
+                "Verify before trusting this change.",
+                file=sys.stderr,
+            )
 
 
 def explain_limit(result: LoopResult) -> str:

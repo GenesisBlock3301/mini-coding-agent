@@ -55,8 +55,27 @@ def run_python(path: str, *, root: Path) -> ToolResult:
     if not target.is_file():
         return _tool_error("not_found", f"{echo_path(path)} is not a file in the workspace.")
 
+    return _execute([sys.executable, str(target)], root=root, what="Python execution")
+
+
+def run_tests(*, root: Path) -> ToolResult:
+    """Run the workspace's whole unittest suite: `python -m unittest discover`.
+
+    No arguments, so the model cannot choose flags. Starts in `tests/` when it
+    exists, otherwise the workspace root. Zero tests found is an ERROR, never a
+    pass: "no tests" must not read as "all good". The END of the output is kept
+    when it is long, because the summary line is at the end.
+    """
+    start = "tests" if (Path(root) / "tests").is_dir() else "."
+    return _execute(
+        [sys.executable, "-m", "unittest", "discover", "-s", start],
+        root=root, what="Test run", keep_tail=True, no_tests_code=5,
+    )
+
+
+def _execute(argv, *, root, what, keep_tail=False, no_tests_code=None) -> ToolResult:
     # Do not pass API credentials or arbitrary shell configuration to the
-    # child. This is not an OS sandbox: the script still runs as this user.
+    # child. The macOS sandbox, when present, confines it further.
     child_env = {
         key: os.environ[key]
         for key in ("PATH", "SYSTEMROOT", "TMPDIR", "TEMP", "TMP")
@@ -64,9 +83,16 @@ def run_python(path: str, *, root: Path) -> ToolResult:
     }
     child_env["PYTHONPATH"] = str(Path(root).resolve())
     sandbox = sandbox_prefix(root)
+
+    def show(raw: bytes) -> str:
+        text = (raw[-MAX_RUN_OUTPUT_BYTES:] if keep_tail else raw[:MAX_RUN_OUTPUT_BYTES]).decode("utf-8", errors="replace")
+        if len(raw) > MAX_RUN_OUTPUT_BYTES:
+            text = ("(earlier output cut)\n" + text) if keep_tail else text + f"\n(output truncated at {MAX_RUN_OUTPUT_BYTES} bytes)"
+        return text
+
     try:
         process = subprocess.Popen(
-            [*sandbox, sys.executable, str(target)],
+            [*sandbox, *argv],
             cwd=root,
             env=child_env,
             stdout=subprocess.PIPE,
@@ -78,22 +104,19 @@ def run_python(path: str, *, root: Path) -> ToolResult:
         except subprocess.TimeoutExpired:
             os.killpg(process.pid, signal.SIGKILL)
             output, _ = process.communicate()
-            shown = output[:MAX_RUN_OUTPUT_BYTES].decode("utf-8", errors="replace")
             return _tool_error(
                 "execution_timeout",
-                f"Python execution timed out after {MAX_RUN_SECONDS}s. Output:\n{shown}",
+                f"{what} timed out after {MAX_RUN_SECONDS}s. Output:\n{show(output)}",
             )
     except OSError as exc:
-        return _tool_error("execution_failed", f"Could not run Python: {exc}")
+        return _tool_error("execution_failed", f"Could not run: {exc}")
 
-    shown = output[:MAX_RUN_OUTPUT_BYTES].decode("utf-8", errors="replace")
-    if len(output) > MAX_RUN_OUTPUT_BYTES:
-        shown += f"\n(output truncated at {MAX_RUN_OUTPUT_BYTES} bytes)"
+    shown = show(output)
+    note = "" if sandbox else "\n(ran without a sandbox)"
+    if no_tests_code is not None and process.returncode == no_tests_code:
+        return _tool_error("no_tests_found", f"No tests were found, so nothing was verified.\n{shown}{note}")
     return ToolResult(
         ok=process.returncode == 0,
-        content=(f"exit code: {process.returncode}\n{shown}" if shown else f"exit code: {process.returncode} (no output)")
-        + ("" if sandbox else "\n(ran without a sandbox)"),
+        content=(f"exit code: {process.returncode}\n{shown}" if shown else f"exit code: {process.returncode} (no output)") + note,
         error_code=None if process.returncode == 0 else "execution_failed",
     )
-
-

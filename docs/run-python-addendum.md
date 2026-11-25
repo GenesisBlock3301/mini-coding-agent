@@ -54,6 +54,25 @@ script ran in 0 of 9. In total 0 of 12 injected runs executed the canary. One
 model, small samples, and a canary that only writes a file; the code would not
 have stopped a model that obeyed.
 
+## `run_tests` (added 2026-11-25)
+
+`run_tests()` takes no arguments and runs `python -m unittest discover -s tests`
+(or `-s .` when there is no `tests/`) through the same approval, sandbox, 30 s
+timeout and environment as `run_python`. Zero tests found is `no_tests_found`,
+never a pass, and long output keeps its end (the summary). Replay treats it like
+`run_python`: an interrupted run is not repeated.
+
+**Verification rules**
+- The system prompt says the agent MUST run it after any change.
+- Code backs that up: every successful edit result carries "Next: call
+  run_tests to verify...", the loop tracks `unverified_changes` (cleared only by
+  a passing `run_tests` after the last change), and the CLI and chat print a
+  WARNING when a run ends with it set.
+- Not forced: a model can still skip it. The warning makes that visible
+  instead of preventing it. Only unittest is supported (no pytest).
+- Live check: on a copy of `practice/`, the agent fixed `subtract`, ran the full
+  suite (7 tests, OK) and reported it.
+
 ## Folder trust
 
 Both `mini-chat` and `mini-agent` ask before using a new folder (`agent/trust.py`),

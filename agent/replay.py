@@ -176,7 +176,7 @@ class ReplayPlan:
         Both sentences say what was NOT done and what to do next. A model told
         only "interrupted" asks again; a model told "read the file" reads it.
         """
-        if self.name == "run_python" and self.verdict == UNKNOWN:
+        if self.name in ("run_python", "run_tests") and self.verdict == UNKNOWN:
             return (
                 f"Execution of {self.where} was interrupted. It may have had "
                 "side effects, so it was NOT rerun automatically. Inspect the "
@@ -229,7 +229,7 @@ def decide(intent: dict[str, Any], *, root: Path) -> ReplayPlan:
     before = intent.get("before")
 
     # Arbitrary script side effects cannot be inferred from its source-file hash.
-    if name == "run_python":
+    if name in ("run_python", "run_tests"):
         return ReplayPlan(UNKNOWN, call_id, name, path, before, None)
 
     # A read that half-ran read half a file into a process that no longer

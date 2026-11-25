@@ -137,6 +137,8 @@ class LoopResult:
     # explicitly when a limit is reached, AND REPORT CHANGES ALREADY MADE";
     # until this session there were never any changes to report.
     changed_paths: list[str] = field(default_factory=list)
+    # True when files changed and no passing run_tests came after the last change.
+    unverified_changes: bool = False
     # Session 8, D74/D75. Every tool error this run produced, in order, and
     # how many of them were a byte-identical repeat of a call that had already
     # failed. Neither stops anything - they are the measurement that says
@@ -305,6 +307,8 @@ class _Run:
     malformed: list[str] = field(default_factory=list)
     # D52. Appended only by _answer, only when a tool reported a change.
     changed: list[str] = field(default_factory=list)
+    # A change landed and no passing run_tests has followed it.
+    unverified: bool = False
     # Session 8, D72. In-flight calls from a dead process, already decided.
     # Empty for a fresh run; emptied as the resumed batch consumes it.
     replay_plans: dict[str, ReplayPlan] = field(default_factory=dict)
@@ -609,6 +613,14 @@ class _Run:
         Durable before the caller is told, so a crash inside `on_tool` still
         leaves a resumable journal.
         """
+        name = (call.get("function") or {}).get("name")
+        if result.changed_path is not None and name not in ("run_python", "run_tests"):
+            self.unverified = True
+            note = (note + "\n" if note else "") + (
+                "Next: call run_tests to verify this change before you give your final answer."
+            )
+        elif name == "run_tests" and result.ok:
+            self.unverified = False
         message = tool_message(call, result, note=note)
         self.history.append(message)
 
@@ -684,6 +696,7 @@ class _Run:
             budget=self.budget,
             malformed_call_ids=self.malformed,
             changed_paths=self.changed,
+            unverified_changes=self.unverified,
             tool_errors=self.errors,
             repeated_failures=self.tally.repeated_failures,
             repeated_calls=self.tally.repeated_calls,
@@ -866,6 +879,7 @@ def _start(
     # request that is not safe to send twice is not made safe by the process
     # that made the edit having died.
     run.changed = list(resume.changed_paths)
+    run.unverified = bool(run.changed)  # conservative: the tests may or may not have run
     run.ledger.record_usage(
         prompt_tokens=resume.prompt_tokens,
         completion_tokens=resume.completion_tokens,

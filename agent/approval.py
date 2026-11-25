@@ -39,7 +39,7 @@ def approving_dispatcher(
 
     def dispatcher(name: str, arguments: str, *, root):
         nonlocal always
-        if name != "run_python" or always or os.getenv("ALLOW_RUN_PYTHON") == "1":
+        if name not in ("run_python", "run_tests") or always or os.getenv("ALLOW_RUN_PYTHON") == "1":
             return dispatch(name, arguments, root=root)
         tty = sys.stdin.isatty() if interactive is None else interactive
         if not tty:
@@ -49,7 +49,7 @@ def approving_dispatcher(
                         "Tell the user; do not retry.",
                 error_code="approval_required",
             )
-        path = _path(arguments)
+        path = "the project's tests" if name == "run_tests" else _path(arguments)
         print(f"\nThe agent wants to run: {path}\n  in {root}", file=sys.stderr)
         try:
             answer = ask("Run it? [y]es / [a]lways this session / [N]o: ").strip().lower()
