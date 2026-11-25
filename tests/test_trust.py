@@ -89,3 +89,24 @@ def test_end_of_input_counts_as_no(env):
         raise EOFError
 
     assert not trust.ensure_trusted(project, ask=eof, interactive=True)
+
+
+def test_one_shot_cli_refuses_an_untrusted_folder_before_any_model_call(tmp_path, monkeypatch, capsys):
+    """mini-agent asks the same question as mini-chat. conftest pre-trusts
+    folders for other tests; this one puts the real check back."""
+    import agent.cli as cli
+
+    monkeypatch.setattr(cli, "ensure_trusted", trust.ensure_trusted)
+    monkeypatch.setattr(trust, "store_path", lambda: tmp_path / "state" / "t.json")
+    project = tmp_path / "proj"
+    project.mkdir()
+
+    def no_model(*a, **k):
+        raise AssertionError("the model must not be called")
+
+    monkeypatch.setattr("agent.model.call_model", no_model)
+    monkeypatch.setattr("agent.loop.run_loop", no_model)
+    monkeypatch.setattr("sys.stdin", type("NoTty", (), {"isatty": lambda self: False})())
+    code = cli.main(["mini-agent", f"--workspace={project}", "do something"])
+    assert code == cli.EXIT_USAGE
+    assert "not trusted yet" in capsys.readouterr().err

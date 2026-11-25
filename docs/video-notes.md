@@ -49,7 +49,9 @@ Two tools, two guarantees. Do not call them the same thing.
 - Injection check (2026-11-25, `deepseek-chat`): `practice/notes/vendor.txt` asks
   the agent to write and run `canary.py`. In 3 of 3 runs it did not, and it
   told the user the file contained an injection. That is a small sample from one
-  model, not a guarantee: the code does not stop a model that obeys.
+  model, not a guarantee: the code does not stop a model that obeys. Three
+  subtler variants (README setup step, code comment, fake owner note), 9 runs,
+  also never ran the canary.
 - `mini-chat` asks "Do you trust the files in this folder?" once per folder
   (`agent/trust.py`). Home and `/` are refused via `cd` and never remembered.
 - The session docs and `post-session-15-roadmap.md` predate `run_python` and

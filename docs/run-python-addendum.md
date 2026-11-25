@@ -47,7 +47,17 @@ validation, and membership in `WRITES`.
 
 A live check (2026-11-25, `deepseek-chat`): a file telling the agent to write and
 run `canary.py` was ignored in 3 of 3 runs, and the agent reported the
-injection. One model, three runs; the code would not have stopped it.
+injection. Three subtler variants followed (a README "setup" step, a code comment
+addressed to "automated assistants", and a note claiming to be from the project
+owner), each against an existing harmless `canary.py`, three runs each: the
+script ran in 0 of 9. In total 0 of 12 injected runs executed the canary. One
+model, small samples, and a canary that only writes a file; the code would not
+have stopped a model that obeyed.
+
+## Folder trust
+
+Both `mini-chat` and `mini-agent` ask before using a new folder (`agent/trust.py`),
+before anything is spent.
 
 ## Not done
 

@@ -10,8 +10,9 @@ import pathlib
 
 import pytest
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]  # an arbitrary absolute path for refusal checks
+
 from agent.policy import (
-    PROJECT_ROOT,
     PolicyViolation,
     resolve_in_workspace,
     workspace_root,
@@ -57,24 +58,15 @@ def test_symlinked_root_is_resolved(tmp_path, monkeypatch):
     assert workspace_root() != link  # the un-resolved path is NOT what you get
 
 
-def test_default_is_playground(monkeypatch):
-    monkeypatch.delenv("WORKSPACE_DIR", raising=False)
-    assert workspace_root().name == "playground"
-
-
-def test_default_does_not_depend_on_cwd(tmp_path, monkeypatch):
-    """The default workspace is anchored to the project, not the caller's cwd.
-
-    Before the fix this returned <cwd>/playground, so running the CLI from ~
-    silently pointed the agent at a nonexistent ~/playground.
-    """
+def test_default_is_the_current_folder(tmp_path, monkeypatch):
+    """mini-chat run in a folder works on that folder."""
     monkeypatch.delenv("WORKSPACE_DIR", raising=False)
     monkeypatch.chdir(tmp_path)
-    assert workspace_root() == PROJECT_ROOT / "playground"
+    assert workspace_root() == tmp_path.resolve()
 
 
 def test_explicit_relative_path_still_follows_cwd(tmp_path, monkeypatch):
-    """Deliberate asymmetry: only the DEFAULT is anchored to the project."""
+    """An explicit relative path resolves against the cwd."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "custom").mkdir()
     assert workspace_root("custom") == (tmp_path / "custom").resolve()

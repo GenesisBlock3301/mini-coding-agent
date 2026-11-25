@@ -32,7 +32,7 @@ If you install directly from a package without a source checkout, create the sam
 
 A fresh run uses the current directory as its workspace. Run the command from the project you want to edit, or choose another directory with `--workspace=DIR` or `WORKSPACE_DIR`. The agent refuses a workspace containing its state or config, so it cannot edit its own journal or credentials through file tools.
 
-The first time `mini-chat` opens a folder it asks "Do you trust the files in this folder?" and remembers a yes in `trusted-workspaces.json` under the state directory (outside the workspace). Trusting a folder covers its subfolders. Your home directory and filesystem roots are refused when you reach them by `cd`, and are asked about every time, never remembered, when you pass `--workspace`. Without a terminal an untrusted folder is refused.
+The first time `mini-chat` or `mini-agent` opens a folder it asks "Do you trust the files in this folder?" and remembers a yes in `trusted-workspaces.json` under the state directory (outside the workspace). Trusting a folder covers its subfolders. Your home directory and filesystem roots are refused when you reach them by `cd`, and are asked about every time, never remembered, when you pass `--workspace`. Without a terminal an untrusted folder is refused, so trust a folder once in a terminal before scripting it.
 
 ## Use
 

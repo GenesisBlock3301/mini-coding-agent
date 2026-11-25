@@ -551,14 +551,14 @@ def test_the_temp_file_is_created_beside_the_target_not_in_tmp(workspace):
         seen["dir"] = kwargs.get("dir")
         return real_mkstemp(*args, **kwargs)
 
-    import agent.tools
+    import agent.tools.filesystem as filesystem
 
-    original = agent.tools.tempfile.mkstemp
-    agent.tools.tempfile.mkstemp = recording_mkstemp
+    original = filesystem.tempfile.mkstemp
+    filesystem.tempfile.mkstemp = recording_mkstemp
     try:
         replace_text("src/calc.py", "def add", "def ADD", root=workspace)
     finally:
-        agent.tools.tempfile.mkstemp = original
+        filesystem.tempfile.mkstemp = original
 
     assert seen["dir"] == workspace / "src"
 

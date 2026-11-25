@@ -60,6 +60,7 @@ from agent.journal import (
 )
 from agent.loop import LoopResult, run_loop
 from agent.model import ModelConfig, ModelError, ModelResponse, active_provider, context_warning
+from agent.trust import ensure_trusted
 from agent.storage import JOURNALS_DIR, workspace_root, recorded_workspace
 from agent.replay import plans_for
 from agent.retry import REASON_TEXT, RetryPolicy
@@ -768,6 +769,8 @@ def main(argv: list[str]) -> int:
             "directory. Create it or choose an existing project directory.",
             file=sys.stderr,
         )
+        return EXIT_USAGE
+    if not ensure_trusted(root, explicit=options.workspace is not None or bool(options.resume_run_id)):
         return EXIT_USAGE
     print(f"workspace: {root}", file=sys.stderr)
 
