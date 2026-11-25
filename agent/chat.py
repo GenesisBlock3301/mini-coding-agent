@@ -66,6 +66,7 @@ from agent.cli import (
 )
 from agent.journal import Journal, JournalCorrupt, new_run_id, rebuild
 from agent.loop import LoopResult, run_loop, tool_message
+from agent.approval import approving_dispatcher
 from agent.trust import ensure_trusted
 from agent.model import ModelConfig, ModelError, active_provider, call_model, context_warning
 from agent.storage import workspace_root, recorded_workspace
@@ -147,6 +148,8 @@ class Session:
     # the old behaviour; main() passes RetryPolicy.from_env().
     retry: RetryPolicy = field(default_factory=RetryPolicy.off)
     history: list[dict[str, Any]] = field(default_factory=list)
+    # Asks before run_python; "always" lasts for this session only.
+    dispatcher: Any = field(default_factory=approving_dispatcher)
     memory_proposal: str | None = None
 
     turns: int = 0
@@ -668,6 +671,7 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
     try:
         result = run_loop(
             turn,
+            dispatcher=session.dispatcher,
             root=session.root,
             tools=TOOL_SCHEMAS,
             budget=session.turn_budget(),

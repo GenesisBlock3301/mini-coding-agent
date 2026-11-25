@@ -16,6 +16,34 @@ from .common import (
     _tool_error,
 )
 
+def sandbox_prefix(root: Path) -> list[str]:
+    """macOS only: confine the child with sandbox-exec, else return [].
+
+    Defence in depth, not a complete sandbox. It denies all network access,
+    denies writes outside the workspace and the temp dirs, and denies reading
+    the agent's own state and the usual credential folders. Set
+    MINI_AGENT_NO_SANDBOX=1 to run unconfined (the result says which).
+    Linux has no equivalent wired in: scripts there run unconfined.
+    """
+    if sys.platform != "darwin" or os.getenv("MINI_AGENT_NO_SANDBOX") == "1":
+        return []
+    exe = "/usr/bin/sandbox-exec"
+    if not os.access(exe, os.X_OK):
+        return []
+    from agent.config import config_path
+    from agent.storage import PATHS
+
+    home = Path.home().resolve()
+    allow_write = [Path(root).resolve(), Path("/private/tmp"), Path("/private/var/folders")]
+    deny_read = [home / ".ssh", home / ".aws", home / ".gnupg", config_path().parent, PATHS.root]
+    quote = lambda path: '"' + str(path).replace("\\", "\\\\").replace('"', '\\"') + '"'
+    profile = "(version 1)(allow default)(deny network*)(deny file-write*)"
+    profile += "(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") " + " ".join(
+        f"(subpath {quote(path)})" for path in allow_write) + ")"
+    profile += "(deny file-read* " + " ".join(f"(subpath {quote(path)})" for path in deny_read) + ")"
+    return [exe, "-p", profile]
+
+
 def run_python(path: str, *, root: Path) -> ToolResult:
     """Run one workspace Python script, without a shell, under a hard timeout."""
     try:
@@ -35,9 +63,10 @@ def run_python(path: str, *, root: Path) -> ToolResult:
         if key in os.environ
     }
     child_env["PYTHONPATH"] = str(Path(root).resolve())
+    sandbox = sandbox_prefix(root)
     try:
         process = subprocess.Popen(
-            [sys.executable, str(target)],
+            [*sandbox, sys.executable, str(target)],
             cwd=root,
             env=child_env,
             stdout=subprocess.PIPE,
@@ -62,7 +91,8 @@ def run_python(path: str, *, root: Path) -> ToolResult:
         shown += f"\n(output truncated at {MAX_RUN_OUTPUT_BYTES} bytes)"
     return ToolResult(
         ok=process.returncode == 0,
-        content=(f"exit code: {process.returncode}\n{shown}" if shown else f"exit code: {process.returncode} (no output)"),
+        content=(f"exit code: {process.returncode}\n{shown}" if shown else f"exit code: {process.returncode} (no output)")
+        + ("" if sandbox else "\n(ran without a sandbox)"),
         error_code=None if process.returncode == 0 else "execution_failed",
     )
 

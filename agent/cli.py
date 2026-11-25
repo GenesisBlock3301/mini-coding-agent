@@ -60,6 +60,7 @@ from agent.journal import (
 )
 from agent.loop import LoopResult, run_loop
 from agent.model import ModelConfig, ModelError, ModelResponse, active_provider, context_warning
+from agent.approval import approving_dispatcher
 from agent.trust import ensure_trusted
 from agent.storage import JOURNALS_DIR, workspace_root, recorded_workspace
 from agent.replay import plans_for
@@ -819,6 +820,7 @@ def main(argv: list[str]) -> int:
             on_tool=print_tool,
             on_context=print_context,
             journal=journal,
+            dispatcher=approving_dispatcher(),
             resume=resume,
             retry=retry,
         )

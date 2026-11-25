@@ -42,6 +42,9 @@ Two tools, two guarantees. Do not call them the same thing.
   and 8,000 bytes of output, with only `PATH` and temp variables passed (no API
   keys). The script still runs as your user and can read, write and use the
   network outside the workspace.
+- Since 2026-11-25 every run asks for approval, and on macOS the script runs in
+  `sandbox-exec` (no network, writes only in the workspace). Say "macOS only,
+  defence in depth" and do not call it a sandbox on Linux.
 - Do **not** say "the agent has no command execution". Say: **"no shell, but it
   can run a Python file, so only run it on code you trust."**
 - Prompt injection matters more because of this: a file could tell the agent to

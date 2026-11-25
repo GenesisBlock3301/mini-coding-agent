@@ -59,7 +59,29 @@ have stopped a model that obeyed.
 Both `mini-chat` and `mini-agent` ask before using a new folder (`agent/trust.py`),
 before anything is spent.
 
+## Approval and sandbox (added 2026-11-25)
+
+- **Approval** (`agent/approval.py`): each `run_python` call asks
+  `[y]es / [a]lways this session / [N]o`. A refusal returns `denied_by_user` to
+  the model. With no terminal the call returns `approval_required`.
+  `ALLOW_RUN_PYTHON=1` skips the question. `tests/test_approval.py`, 6 tests.
+- **Sandbox, macOS only** (`sandbox_prefix` in `agent/tools/execution.py`,
+  `sandbox-exec`): network denied; writes only in the workspace and temp dirs;
+  reads denied for the agent's state, its config, `~/.ssh`, `~/.aws`,
+  `~/.gnupg`. Four tests prove each rule. `MINI_AGENT_NO_SANDBOX=1` turns it
+  off, and the result then ends with "(ran without a sandbox)". `sandbox-exec`
+  is deprecated by Apple but still ships. Linux and Windows run unconfined.
+- Reads outside those folders are still allowed, so a script can read other
+  files you own. Treat the sandbox as a second lock, not a vault.
+
 ## Not done
 
-No sandbox, no network denial, no per-run approval, no `run_tests`. Those are
-the roadmap's command-execution phase.
+No Linux sandbox, no `run_tests`, no per-command allow rules. Those are the
+roadmap's command-execution phase.
+
+## Model coverage
+
+The injection checks ran on DeepSeek only. A second run set to
+`deepseek-reasoner` was labelled `deepseek-flash` by the server, the same label
+as the `deepseek-chat` runs, so it is not counted as a different model. No
+other provider key or local Ollama server was available.

@@ -88,3 +88,56 @@ def test_dispatch_rejects_extra_arguments_and_unknown_shapes(tmp_path):
 
 def test_run_python_counts_as_a_writer_and_is_never_replayed():
     assert "run_python" in registry.WRITES
+
+
+import sys as _sys
+
+mac_only = pytest.mark.skipif(
+    _sys.platform != "darwin" or not os.access("/usr/bin/sandbox-exec", os.X_OK),
+    reason="the sandbox is macOS sandbox-exec only",
+)
+
+
+@mac_only
+def test_sandbox_blocks_network(tmp_path):
+    write(tmp_path, "net.py", "import socket\ntry:\n    socket.create_connection(('1.1.1.1', 80), timeout=3)\n    print('CONNECTED')\nexcept OSError as e:\n    print('blocked', type(e).__name__)\n")
+    result = run_python("net.py", root=tmp_path)
+    assert "CONNECTED" not in result.content and "blocked" in result.content
+
+
+@mac_only
+def test_sandbox_blocks_writes_outside_the_workspace(tmp_path):
+    root = tmp_path / "ws"
+    root.mkdir()
+    target = Path.home() / ".mini-agent-sandbox-probe"
+    write(root, "w.py", f"from pathlib import Path\ntry:\n    Path({str(target)!r}).write_text('x')\n    print('WROTE')\nexcept OSError:\n    print('blocked')\n")
+    result = run_python("w.py", root=root)
+    target.unlink(missing_ok=True)
+    assert "WROTE" not in result.content and "blocked" in result.content
+
+
+@mac_only
+def test_sandbox_still_allows_writes_inside_the_workspace(tmp_path):
+    write(tmp_path, "ok.py", "open('made.txt','w').write('y'); print('fine')")
+    assert "fine" in run_python("ok.py", root=tmp_path).content
+    assert (tmp_path / "made.txt").read_text() == "y"
+
+
+@mac_only
+def test_sandbox_hides_the_agents_own_state(tmp_path, monkeypatch):
+    from agent.storage import PATHS
+    PATHS.root.mkdir(parents=True, exist_ok=True)
+    probe = PATHS.root / "probe.txt"
+    probe.write_text("secret")
+    try:
+        write(tmp_path, "r.py", f"from pathlib import Path\ntry:\n    print(Path({str(probe)!r}).read_text())\nexcept OSError:\n    print('blocked')\n")
+        result = run_python("r.py", root=tmp_path)
+    finally:
+        probe.unlink(missing_ok=True)
+    assert "secret" not in result.content and "blocked" in result.content
+
+
+def test_opt_out_runs_unconfined_and_says_so(tmp_path, monkeypatch):
+    monkeypatch.setenv("MINI_AGENT_NO_SANDBOX", "1")
+    write(tmp_path, "hi.py", "print('hi')")
+    assert "ran without a sandbox" in run_python("hi.py", root=tmp_path).content

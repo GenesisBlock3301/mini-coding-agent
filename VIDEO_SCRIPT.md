@@ -87,7 +87,7 @@ Use a disposable fixture project, never a real one. Never show the `.env`.
 3. File content is untrusted data. Show a file that says "ignore your instructions".
 4. Memory also sits outside the workspace, so the agent cannot rewrite its own instructions.
 5. Honest limits: path checks are not a full sandbox against hostile concurrent filesystems.
-6. The one tool the boundary does not contain: `run_python` runs a workspace `.py` file as your OS user (30 s limit, 8,000-byte output, no shell, API keys not passed to the child). A script can touch files and the network outside the workspace. So the injection above is only as safe as this tool is trusted. Say it plainly, and use disposable projects.
+6. The one tool the boundary does not contain: `run_python` runs a workspace `.py` file as your OS user (30 s limit, 8,000-byte output, no shell, API keys not passed to the child). Each run asks for approval, and on macOS it runs under `sandbox-exec` (no network, writes only in the workspace and temp). Elsewhere a script can touch files and the network outside the workspace. So the injection above is only as safe as this tool is trusted. Say it plainly, and use disposable projects.
 
 **Demo:** run the agent against `../../etc/passwd` and a symlink to it; show the refusal.
 **Break it:** the prompt-injection file. The agent may try; policy still refuses.
