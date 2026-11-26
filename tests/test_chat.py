@@ -348,8 +348,11 @@ def test_a_retryable_failure_no_longer_costs_the_user_their_turn(monkeypatch, ca
     assert "turn discarded" not in capsys.readouterr().err
 
 
-def test_the_banner_names_the_retry_policy(capsys):
-    """A retry policy nobody can see is latency with no explanation."""
+def test_the_banner_names_the_retry_policy(capsys, monkeypatch):
+    """A retry policy nobody can see is latency with no explanation. The
+    compact banner hides it; the verbose one (MINI_AGENT_VERBOSE / /verbose)
+    must still show it."""
+    monkeypatch.setattr("agent.chat._VERBOSE", True)
     main([], model_fn=ScriptedModel(), read_line=lines())
 
     assert "retry:" in capsys.readouterr().err

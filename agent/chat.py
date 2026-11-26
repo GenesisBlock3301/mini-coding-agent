@@ -45,7 +45,9 @@ split as cli.py, which is what makes `2>/dev/null` a clean transcript.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -80,7 +82,59 @@ try:  # Arrow-key history for input(), for one import. Absent on some platforms.
 except ImportError:  # pragma: no cover - platform dependent
     pass
 
-PROMPT = "\n> "
+PROMPT = "\n\u276f "
+PLACEHOLDER = "Ask anything, or type / for commands"
+
+# Compact view (default): tool calls as dim one-liners and a one-line footer,
+# like Claude Code. /verbose (or MINI_AGENT_VERBOSE=1) brings back the full
+# per-step trace; the journal holds the full trace either way (/trace).
+_VERBOSE = bool(os.getenv("MINI_AGENT_VERBOSE"))
+
+
+def _style(text: str, code: str) -> str:
+    """ANSI styling for stderr, only on a terminal and without NO_COLOR."""
+    if sys.stderr.isatty() and not os.getenv("NO_COLOR"):
+        return f"\033[{code}m{text}\033[0m"
+    return text
+
+
+def _short_args(raw: str, limit: int = 70) -> str:
+    """`{"path": "."}` -> `path=.` ; long values are cut."""
+    try:
+        data = json.loads(raw) if raw else {}
+        text = ", ".join(f"{k}={v}" for k, v in data.items()) if isinstance(data, dict) else raw
+    except ValueError:
+        text = raw
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[: limit - 1] + "\u2026"
+
+
+# Tool calls of the latest turn, kept so /expand can open any compact line.
+_TURN_TOOLS: list[tuple[int, dict, ToolResult]] = []
+
+
+def print_tool_compact(step: int, call: dict, result: ToolResult) -> None:
+    _TURN_TOOLS.append((step, call, result))
+    function = call.get("function") or {}
+    name = function.get("name", "<missing>")
+    line = f"\u23fa [{len(_TURN_TOOLS)}] {name}({_short_args(function.get('arguments', ''))})"
+    if not result.ok:
+        line += f"  \u2717 {result.error_code}"
+    print(_style(line, "2" if result.ok else "31"), file=sys.stderr, flush=True)
+    lines = len(result.content.splitlines())
+    summary = f"{lines} line{'s' if lines != 1 else ''}" if result.content.strip() else "no output"
+    print(_style(f"  \u23bf  {summary} (Ctrl+O to expand)", "2"), file=sys.stderr, flush=True)
+
+
+def _quiet_response(step: int, response) -> None:
+    return None
+
+
+def _compact_footer(result: LoopResult) -> str:
+    return (
+        f"\u2713 {result.steps} step(s) \u00b7 {result.tool_calls} tool(s) \u00b7 "
+        f"{result.elapsed_s:.1f}s \u00b7 {result.total_tokens:,} tokens"
+    )
 
 # D59. A ceiling on the conversation, measured in the model's own count of our
 # prompt. Lives here rather than in agent/ because it is a property of the
@@ -322,7 +376,10 @@ def start_session(
     if resume_id is None:
         session_id = new_run_id()
         text, digest, path = read_memory(root)
-        print(f"memory: {path} (sha256 {digest})", file=sys.stderr)
+        # Display only: ~ for home, and the 64-char hash filename cut to 8.
+        short = str(path).replace(str(Path.home()), "~", 1)
+        short = re.sub(r"/([0-9a-f]{8})[0-9a-f]{56}\.md$", r"/\1….md", short)
+        print(f"memory: {short} (sha256 {digest[:8]})", file=sys.stderr)
         history = [{"role": "system", "content": TOOLS_SYSTEM_PROMPT}]
         if text:
             history.append(memory_message(text))
@@ -542,6 +599,33 @@ def _cmd_reset(session: Session) -> bool:
     return True
 
 
+def _cmd_expand(session: Session, argument: str = "") -> bool:
+    """Full detail for the compact tool lines of the last turn: `/expand`
+    for all of them, `/expand 2` for one."""
+    if not _TURN_TOOLS:
+        print("nothing to expand: the last turn made no tool calls.", file=sys.stderr)
+        return True
+    arg = argument.strip()
+    if arg and arg != "all":
+        if not arg.isdigit() or not 1 <= int(arg) <= len(_TURN_TOOLS):
+            print(f"usage: /expand [all|1-{len(_TURN_TOOLS)}]", file=sys.stderr)
+            return True
+        chosen = [(int(arg), _TURN_TOOLS[int(arg) - 1])]
+    else:
+        chosen = list(enumerate(_TURN_TOOLS, 1))
+    for number, (step, call, result) in chosen:
+        print(f"\n[{number}] step {step}", file=sys.stderr)
+        print_tool(step, call, result)
+    return True
+
+
+def _cmd_verbose(session: Session) -> bool:
+    global _VERBOSE
+    _VERBOSE = not _VERBOSE
+    print(f"verbose trace {'on' if _VERBOSE else 'off'}", file=sys.stderr)
+    return True
+
+
 def _cmd_help(session: Session) -> bool:
     print(help_text(), file=sys.stderr)
     return True
@@ -590,7 +674,9 @@ COMMANDS: tuple[Command, ...] = (
     Command("remember", "propose an exact user statement", _cmd_remember, takes_argument=True),
     Command("approve-memory", "save the current proposal", _cmd_approve_memory),
     Command("cancel-memory", "discard the current proposal", _cmd_cancel_memory),
-    Command("reset", "forget the conversation, keep the budget spent", _cmd_reset),
+    Command("reset", "forget the conversation, keep the budget spent", _cmd_reset, aliases=("clear",)),
+    Command("expand", "full output of the last turn's tool calls   [n]", _cmd_expand, takes_argument=True),
+    Command("verbose", "toggle the full step-by-step trace", _cmd_verbose),
     Command("help", "this", _cmd_help),
     Command("quit", "end the session", _cmd_quit, aliases=("q", "exit")),
 )
@@ -667,6 +753,7 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
     # A ModelError or a Ctrl-C therefore leaves the conversation exactly as it
     # was, instead of stranding a user message nothing ever answered.
     turn = [*session.history, {"role": "user", "content": task}]
+    _TURN_TOOLS.clear()
 
     try:
         result = run_loop(
@@ -676,8 +763,8 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
             tools=TOOL_SCHEMAS,
             budget=session.turn_budget(),
             model_fn=model_fn,
-            on_response=print_response,
-            on_tool=print_tool,
+            on_response=print_response if _VERBOSE else _quiet_response,
+            on_tool=print_tool if _VERBOSE else print_tool_compact,
             journal=session.journal,
             retry=session.retry,
         )
@@ -693,10 +780,13 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
         )
         return
 
-    report_totals(result)
     session.record(result)
     session.history = result.messages  # D58: the partial turn is kept
-    print(f"[session] {session.describe()}", file=sys.stderr)
+    if _VERBOSE:
+        report_totals(result)
+        print(f"[session] {session.describe()}", file=sys.stderr)
+    else:
+        print(_style(_compact_footer(result), "2"), file=sys.stderr)
 
     if (
         session.max_context_tokens is not None
@@ -719,7 +809,18 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
         return
 
     if result.text is not None and result.text.strip():
-        print(result.text)
+        # The trace above goes to stderr, the answer to stdout; in a terminal
+        # they look identical, so mark where the answer starts. The marker is
+        # on stderr, so `2>/dev/null` still yields the bare answer.
+        print(
+            "\n\u2500\u2500\u2500 answer \u2500\u2500\u2500" if _VERBOSE else "",
+            file=sys.stderr,
+            flush=True,
+        )
+        text = result.text
+        if sys.stdout.isatty() and not os.getenv("NO_COLOR"):
+            text = f"\033[97m{text}\033[0m"  # bright white; piped output stays plain
+        print(text, flush=True)
     elif result.stop_reason == "answer":
         print(
             "No final response text was returned by the model. Please try the question again.",
@@ -782,6 +883,16 @@ def model_label(provider) -> str:
 
 def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
     """Everything printed once, before the first prompt."""
+    if not _VERBOSE:
+        home = str(Path.home())
+        where = str(session.root).replace(home, "~", 1)
+        print(_style("mini-agent", "1"), file=sys.stderr)
+        print(_style(f"  {session.model_label} \u00b7 {where}", "2"), file=sys.stderr)
+        print(_style(f"  session {session.session_id}", "2"), file=sys.stderr)
+        _print_banner_warnings(session, turn_limits)
+        print(file=sys.stderr)
+        print(_style("  / commands \u00b7 Ctrl+O details \u00b7 /verbose full trace \u00b7 /quit or Ctrl-D to exit", "2"), file=sys.stderr)
+        return
     print(
         f"session {session.session_id}  (resume with --resume={session.session_id})",
         file=sys.stderr,
@@ -797,6 +908,12 @@ def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
         file=sys.stderr,
     )
 
+    _print_banner_warnings(session, turn_limits)
+    print(file=sys.stderr)
+    print("type / to pick a command. /help lists them. /quit or Ctrl-D to end.", file=sys.stderr)
+
+
+def _print_banner_warnings(session: Session, turn_limits: Budget) -> None:
     # Found by writing the tests, not by reasoning about it: check_before_step
     # compares tokens-so-far PLUS the reserve against the cap, so a session
     # token budget at or below the reserve refuses every turn before a single
@@ -818,9 +935,6 @@ def _print_banner(session: Session, provider, turn_limits: Budget) -> None:
         warning = None
     if warning:
         print(f"warning: {warning}", file=sys.stderr)
-
-    print(file=sys.stderr)
-    print("type / to pick a command. /help lists them. /quit or Ctrl-D to end.", file=sys.stderr)
 
 
 def _command_completer():
@@ -855,6 +969,17 @@ def prompt_widget(**overrides: Any):
     this configuration and not a second one written beside it."""
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.styles import Style
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.application import run_in_terminal
+
+    bindings = KeyBindings()
+
+    @bindings.add("c-o")
+    def _expand_last_turn(event) -> None:
+        # Ctrl+O at the prompt: print every tool call of the last turn in full,
+        # above the prompt, without disturbing what has been typed.
+        run_in_terminal(lambda: _cmd_expand(None, ""))
 
     settings: dict[str, Any] = {
         "completer": _command_completer(),
@@ -862,6 +987,9 @@ def prompt_widget(**overrides: Any):
         # with every further character. Tab or the arrow keys pick.
         "complete_while_typing": True,
         "history": InMemoryHistory(),
+        "placeholder": [("class:placeholder", PLACEHOLDER)],
+        "key_bindings": bindings,
+        "style": Style.from_dict({"placeholder": "#888888 italic"}),
         "reserve_space_for_menu": len(COMMANDS) + 1,
     }
     settings.update(overrides)
