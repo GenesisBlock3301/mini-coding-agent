@@ -45,9 +45,12 @@ split as cli.py, which is what makes `2>/dev/null` a clean transcript.
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -619,6 +622,35 @@ def _cmd_expand(session: Session, argument: str = "") -> bool:
     return True
 
 
+# Rows currently on screen from Ctrl+O, so the next Ctrl+O can erase exactly them.
+_EXPANDED_ROWS = 0
+
+
+def _toggle_expanded() -> None:
+    """Ctrl+O: print the last turn's tool output, or erase it if it is showing.
+
+    Printed text cannot be un-printed, but the cursor sits just below it, so
+    moving up the number of rows it took (wrapping counted) and clearing to
+    the end of the screen removes it. If the output outgrew the screen, only
+    the visible part is erased.
+    """
+    global _EXPANDED_ROWS
+    if _EXPANDED_ROWS:
+        rows = min(_EXPANDED_ROWS, shutil.get_terminal_size().lines - 1)
+        sys.stderr.write(f"\033[{rows}F\033[J")
+        sys.stderr.flush()
+        _EXPANDED_ROWS = 0
+        return
+    buffer = io.StringIO()
+    with contextlib.redirect_stderr(buffer):
+        _cmd_expand(None, "")
+    text = buffer.getvalue()
+    width = max(shutil.get_terminal_size().columns, 1)
+    _EXPANDED_ROWS = sum(max(1, -(-len(line) // width)) for line in text.split("\n")[:-1])
+    sys.stderr.write(text)
+    sys.stderr.flush()
+
+
 def _cmd_verbose(session: Session) -> bool:
     global _VERBOSE
     _VERBOSE = not _VERBOSE
@@ -754,6 +786,8 @@ def take_turn(session: Session, task: str, model_fn: Callable) -> None:
     # was, instead of stranding a user message nothing ever answered.
     turn = [*session.history, {"role": "user", "content": task}]
     _TURN_TOOLS.clear()
+    global _EXPANDED_ROWS
+    _EXPANDED_ROWS = 0
 
     try:
         result = run_loop(
@@ -979,7 +1013,7 @@ def prompt_widget(**overrides: Any):
     def _expand_last_turn(event) -> None:
         # Ctrl+O at the prompt: print every tool call of the last turn in full,
         # above the prompt, without disturbing what has been typed.
-        run_in_terminal(lambda: _cmd_expand(None, ""))
+        run_in_terminal(_toggle_expanded)
 
     settings: dict[str, Any] = {
         "completer": _command_completer(),
